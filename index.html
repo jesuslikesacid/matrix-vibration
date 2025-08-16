@@ -1,0 +1,435 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Matrix Grid Vibration Lab</title>
+  <meta name="description" content="Neon grid 2D vibration simulator with sequencer + VJ mode" />
+  <style>html,body,#root{height:100%;background:#000;margin:0}</style>
+  <!-- Tailwind via CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- React 18 UMD -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <!-- Babel for JSX (no-build) -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-black">
+  <div id="root"></div>
+  <script type="text/babel">
+    const {useEffect,useRef,useState} = React;
+
+    const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
+    function useRaf(callback, running) {
+      const cb = useRef(callback);
+      const run = useRef(running);
+      useEffect(() => { cb.current = callback; }, [callback]);
+      useEffect(() => { run.current = running; }, [running]);
+      useEffect(() => {
+        let id;
+        const loop = () => { if (run.current) cb.current?.(); id = requestAnimationFrame(loop); };
+        id = requestAnimationFrame(loop);
+        return () => cancelAnimationFrame(id);
+      }, []);
+    }
+
+    function MatrixVibrationLab() {
+      // ======== Canvas app ========
+      const [engine, setEngine] = useState('membrane');
+      const [N, setN] = useState(160);
+      const [c, setC] = useState(0.35);
+      const [k, setK] = useState(0.010);
+      const [gamma, setGamma] = useState(0.010);
+      const [boundary, setBoundary] = useState('fixed');
+      const [stepsPerFrame, setStepsPerFrame] = useState(1);
+      const [ampScale, setAmpScale] = useState(1.2);
+      const [running, setRunning] = useState(true);
+      const [showFPS, setShowFPS] = useState(true);
+
+      const [brushRadius, setBrushRadius] = useState(6);
+      const [brushPower, setBrushPower] = useState(1.0);
+
+      const [gridOn, setGridOn] = useState(true);
+      const [gridOpacity, setGridOpacity] = useState(0.18);
+      const [gridGlow, setGridGlow] = useState(6);
+
+      const [seqOn, setSeqOn] = useState(false);
+      const [seqMode, setSeqMode] = useState('random'); // random | grid
+      const [seqInterval, setSeqInterval] = useState(0.25);
+      const [seqRadius, setSeqRadius] = useState(6);
+      const [seqPower, setSeqPower] = useState(1.2);
+      const [seqCols, setSeqCols] = useState(8);
+      const [seqRows, setSeqRows] = useState(8);
+      const [seqJitter, setSeqJitter] = useState(0.2);
+      const [seqZigzag, setSeqZigzag] = useState(true);
+      const gridStepRef = useRef(0);
+
+      const [vjMode, setVjMode] = useState(false);
+      const [isFs, setIsFs] = useState(false);
+
+      const canvasRef = useRef(null);
+      const containerRef = useRef(null);
+      const gridRef = useRef(null);
+      const dpiRef = useRef(window.devicePixelRatio || 1);
+      const buffers = useRef({ uPrev:null,uCurr:null,uNext:null,lap1:null,lap2:null });
+      const fps = useRef({ last: performance.now(), frames:0, fps:0 });
+
+      useEffect(() => {
+        const onResize = () => { dpiRef.current = window.devicePixelRatio || 1; sizeCanvas(); drawGridOverlay(); };
+        const onFs = () => { setIsFs(!!document.fullscreenElement); sizeCanvas(); drawGridOverlay(); };
+        window.addEventListener('resize', onResize);
+        document.addEventListener('fullscreenchange', onFs);
+        return () => { window.removeEventListener('resize', onResize); document.removeEventListener('fullscreenchange', onFs); };
+      }, []);
+
+      useEffect(() => {
+        const len = N*N;
+        buffers.current.uPrev = new Float32Array(len);
+        buffers.current.uCurr = new Float32Array(len);
+        buffers.current.uNext = new Float32Array(len);
+        buffers.current.lap1 = new Float32Array(len);
+        buffers.current.lap2 = new Float32Array(len);
+        buffers.current.uPrev.fill(0);
+        buffers.current.uCurr.fill(0);
+        buffers.current.uNext.fill(0);
+        sizeCanvas();
+        drawGridOverlay();
+      }, [N, engine]);
+
+      const idx = (x,y)=> y*N + x;
+      const sample = (arr, x, y) => {
+        if (boundary === 'periodic') {
+          const xx=(x+N)%N, yy=(y+N)%N; return arr[idx(xx,yy)];
+        } else if (boundary === 'reflective') {
+          const xx = x<0?0:x>=N?N-1:x, yy = y<0?0:y>=N?N-1:y; return arr[idx(xx,yy)];
+        } else { // fixed
+          if (x<0||y<0||x>=N||y>=N) return 0; return arr[idx(x,y)];
+        }
+      };
+      const lap = (src, out) => {
+        for (let y=0;y<N;y++) for (let x=0;x<N;x++) {
+          const u = src[idx(x,y)];
+          const l = sample(src,x-1,y), r=sample(src,x+1,y), u1=sample(src,x,y-1), d1=sample(src,x,y+1);
+          out[idx(x,y)] = l + r + u1 + d1 - 4*u;
+        }
+      };
+      const stepMembrane = (r,g) => {
+        const {uPrev,uCurr,uNext,lap1} = buffers.current; lap(uCurr,lap1); const L=N*N;
+        for (let i=0;i<L;i++){ const u=uCurr[i], up=uPrev[i]; uNext[i]=clamp(2*u - up + r*lap1[i] - g*(u-up), -100, 100); }
+        buffers.current.uPrev=uCurr; buffers.current.uCurr=uNext; buffers.current.uNext=uPrev;
+      };
+      const stepPlate = (kk,g) => {
+        const {uPrev,uCurr,uNext,lap1,lap2} = buffers.current; lap(uCurr,lap1); lap(lap1,lap2); const L=N*N;
+        for (let i=0;i<L;i++){ const u=uCurr[i], up=uPrev[i]; uNext[i]=clamp(2*u - up + kk*lap2[i] - g*(u-up), -100, 100); }
+        buffers.current.uPrev=uCurr; buffers.current.uCurr=uNext; buffers.current.uNext=uPrev;
+      };
+      const paintImpulse = (cx,cy,r,p) => {
+        const {uCurr}=buffers.current; const r2=r*r;
+        const minX=Math.max(0,Math.floor(cx-r)), maxX=Math.min(N-1,Math.ceil(cx+r));
+        const minY=Math.max(0,Math.floor(cy-r)), maxY=Math.min(N-1,Math.ceil(cy+r));
+        for (let y=minY;y<=maxY;y++) for (let x=minX;x<=maxX;x++){
+          const dx=x-cx, dy=y-cy, d2=dx*dx+dy*dy; if (d2<=r2){ const w=Math.exp(-d2/(0.5*r2+1e-6)); uCurr[idx(x,y)]+=p*w; }
+        }
+      };
+
+      const triggerSequencer = () => {
+        if (seqMode==='random') {
+          const x=Math.floor(Math.random()*N), y=Math.floor(Math.random()*N);
+          paintImpulse(x,y,seqRadius,seqPower);
+        } else {
+          const total=Math.max(1, seqCols*seqRows);
+          let i=gridStepRef.current%total; gridStepRef.current=(gridStepRef.current+1)%total;
+          let gx=i%seqCols, gy=Math.floor(i/seqCols);
+          if (seqZigzag && gy%2===1) gx=seqCols-1-gx;
+          const cellW=N/seqCols, cellH=N/seqRows, cellMin=Math.min(cellW,cellH);
+          const jAmp=seqJitter*0.5*cellMin;
+          let cx=(gx+0.5)*cellW + (Math.random()*2-1)*jAmp;
+          let cy=(gy+0.5)*cellH + (Math.random()*2-1)*jAmp;
+          const x=clamp(Math.round(cx),0,N-1), y=clamp(Math.round(cy),0,N-1);
+          paintImpulse(x,y,seqRadius,seqPower);
+        }
+      };
+
+      useEffect(() => {
+        if (!seqOn) return;
+        const ms = Math.max(20, Math.floor(seqInterval*1000));
+        const id = setInterval(()=>{ if (running) triggerSequencer(); }, ms);
+        return () => clearInterval(id);
+      }, [seqOn, seqInterval, seqMode, seqRadius, seqPower, seqCols, seqRows, seqJitter, seqZigzag, N, running]);
+
+      const sizeCanvas = () => {
+        const canvas=canvasRef.current, parent=containerRef.current; if(!canvas||!parent) return;
+        const rect = parent.getBoundingClientRect();
+        const size = Math.min(rect.width, 760), dpr=dpiRef.current;
+        canvas.style.width = size+'px'; canvas.style.height=size+'px';
+        canvas.width=Math.round(size*dpr); canvas.height=Math.round(size*dpr);
+        canvas.style.imageRendering='pixelated';
+      };
+      const drawGridOverlay = () => {
+        const canvas=canvasRef.current; if (!canvas) return;
+        const W=canvas.width, H=canvas.height;
+        const grid=document.createElement('canvas'); grid.width=W; grid.height=H;
+        const g=grid.getContext('2d');
+        g.clearRect(0,0,W,H);
+        const stepX=W/N, stepY=H/N;
+        g.strokeStyle = `rgba(0,255,140,${gridOpacity})`;
+        g.lineWidth = Math.max(1, Math.floor(Math.min(stepX, stepY) * 0.02));
+        g.shadowColor='rgba(0,255,140,0.7)';
+        g.shadowBlur=gridGlow;
+        for (let i=0;i<=N;i++){ const x=Math.round(i*stepX)+0.5; g.beginPath(); g.moveTo(x,0); g.lineTo(x,H); g.stroke(); }
+        for (let j=0;j<=N;j++){ const y=Math.round(j*stepY)+0.5; g.beginPath(); g.moveTo(0,y); g.lineTo(W,y); g.stroke(); }
+        gridRef.current=grid;
+      };
+
+      useEffect(() => {
+        const canvas=canvasRef.current; if (!canvas) return; let drawing=false;
+        const toCell = (e) => {
+          const rect = canvas.getBoundingClientRect();
+          const x = Math.floor(((e.clientX-rect.left)/rect.width)*N);
+          const y = Math.floor(((e.clientY-rect.top)/rect.height)*N);
+          return {x,y};
+        };
+        const down=(e)=>{ drawing=true; const {x,y}=toCell(e); paintImpulse(x,y,brushRadius,brushPower); };
+        const move=(e)=>{ if(!drawing) return; const {x,y}=toCell(e); paintImpulse(x,y,brushRadius,brushPower*0.5); };
+        const up=()=>{ drawing=false; };
+        canvas.addEventListener('pointerdown',down);
+        window.addEventListener('pointermove',move);
+        window.addEventListener('pointerup',up);
+        return ()=>{ canvas.removeEventListener('pointerdown',down); window.removeEventListener('pointermove',move); window.removeEventListener('pointerup',up); };
+      }, [N, brushRadius, brushPower]);
+
+      useEffect(() => {
+        const onKey=(e)=>{
+          if (e.key===' ') { e.preventDefault(); setRunning(v=>!v); }
+          if (e.key.toLowerCase()==='f') { toggleFullscreen(); }
+          if (e.key.toLowerCase()==='v') { setVjMode(v=>!v); setTimeout(()=>{ sizeCanvas(); drawGridOverlay(); },0); }
+        };
+        window.addEventListener('keydown', onKey);
+        return ()=> window.removeEventListener('keydown', onKey);
+      }, []);
+
+      useRaf(() => {
+        for (let s=0;s<stepsPerFrame;s++){
+          if (engine==='membrane') stepMembrane(clamp(c*c,0,0.5), gamma);
+          else stepPlate(clamp(k,0,0.02), gamma);
+        }
+        const canvas=canvasRef.current; if(!canvas) return;
+        const ctx=canvas.getContext('2d'); const W=canvas.width,H=canvas.height;
+
+        ctx.fillStyle='#000'; ctx.fillRect(0,0,W,H);
+
+        const {uCurr}=buffers.current; const img=ctx.createImageData(W,H);
+        for (let py=0;py<H;py++){
+          const gy=Math.floor((py/H)*N);
+          for (let px=0;px<W;px++){
+            const gx=Math.floor((px/W)*N); const v=uCurr[idx(gx,gy)];
+            const intensity=clamp(Math.abs(v)/ampScale,0,1);
+            const sgn=v>=0?1.0:0.7;
+            const gval=Math.pow(intensity,0.55)*255;
+            const r=gval*0.08*sgn, b=gval*0.18*(1-0.3*sgn);
+            const o=(py*W+px)*4; img.data[o]=r|0; img.data[o+1]=gval|0; img.data[o+2]=b|0; img.data[o+3]=255;
+          }
+        }
+        ctx.putImageData(img,0,0);
+
+        if (gridOn && gridRef.current) {
+          ctx.globalCompositeOperation='screen';
+          ctx.drawImage(gridRef.current,0,0);
+          ctx.globalCompositeOperation='source-over';
+        }
+
+        const now=performance.now(); fps.current.frames++;
+        if (now-fps.current.last>=500){ fps.current.fps=(fps.current.frames*1000)/(now-fps.current.last); fps.current.frames=0; fps.current.last=now; }
+      }, running);
+
+      const reset = ()=>{ buffers.current.uPrev.fill(0); buffers.current.uCurr.fill(0); buffers.current.uNext.fill(0); };
+      const randomize = ()=>{ const L=N*N; for (let i=0;i<L;i++) buffers.current.uCurr[i]=(Math.random()-0.5)*0.4; buffers.current.uPrev.set(buffers.current.uCurr); };
+      const presetDrop = ()=>{ paintImpulse(Math.floor(N/2),Math.floor(N/2),Math.floor(N*0.08),2.0); };
+      const presetTwoSources = ()=>{ paintImpulse(Math.floor(N*0.33),Math.floor(N/2),Math.floor(N*0.05),1.5); paintImpulse(Math.floor(N*0.66),Math.floor(N/2),Math.floor(N*0.05),1.5); };
+      const presetPlaneWave = ()=>{ const {uCurr,uPrev}=buffers.current; const amp=1.0; for(let y=0;y<N;y++) for(let x=0;x<N;x++){ const phase=(x/N)*Math.PI*4; uCurr[idx(x,y)]=amp*Math.sin(phase);} uPrev.set(uCurr); };
+      const exportPNG = ()=>{ const c=canvasRef.current; const a=document.createElement('a'); a.download=`matrix_vibration_${engine}_${Date.now()}.png`; a.href=c.toDataURL('image/png'); a.click(); };
+      const toggleFullscreen = async()=>{ try { if(!document.fullscreenElement){ await containerRef.current?.requestFullscreen?.({navigationUI:'hide'});} else { await document.exitFullscreen(); } } catch(e){ console.warn('Fullscreen not available',e);} };
+
+      useEffect(()=>{ sizeCanvas(); drawGridOverlay(); }, [vjMode]);
+      useEffect(()=>{ drawGridOverlay(); }, [gridOn, gridOpacity, gridGlow, N]);
+
+      const BoundaryHint = () => {
+        const map = { fixed: 'Fixed (Dirichlet)', reflective: 'Reflective (Neumann)', periodic: 'Periodic (Wrap)' };
+        return <span className="text-xs text-emerald-400/70">{map[boundary]}</span>;
+      };
+
+      return (
+        <div className={\`w-full \${vjMode ? 'max-w-none' : 'max-w-[1200px]'} mx-auto p-4 text-emerald-200 bg-black/95 rounded-2xl shadow-[0_0_40px_#00ff8840]\`}>
+          {!vjMode && (
+            <>
+              <h1 className="text-2xl font-bold tracking-wide mb-2 text-emerald-300">Matrix Grid Vibration Lab</h1>
+              <p className="text-sm text-emerald-400/80 mb-4">
+                Neon grid simulation of a vibrating 2D field. Click & drag to excite. PNG capture included.
+                Shortcuts: [Space]=Play/Pause, [F]=Fullscreen, [V]=VJ Mode
+              </p>
+            </>
+          )}
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className={\`\${vjMode ? 'md:col-span-3' : 'md:col-span-2'}\`}>
+              <div ref={containerRef} className="w-full flex items-center justify-center rounded-2xl p-2 bg-gradient-to-b from-black via-zinc-950 to-black border border-emerald-700/30 shadow-[0_0_80px_#00ff8820]">
+                <canvas ref={canvasRef} className="rounded-xl border border-emerald-700/40" />
+              </div>
+              <div className={\`flex items-center gap-3 mt-3 flex-wrap \${vjMode ? 'justify-center' : ''}\`}>
+                <button className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-black font-semibold shadow-[0_0_20px_#00ff88]" onClick={()=>setRunning(v=>!v)}>{running ? 'Pause' : 'Play'}</button>
+                <button className="px-3 py-1.5 rounded-xl bg-zinc-800 text-emerald-200 border border-emerald-700/40" onClick={()=>{ setRunning(false); if(engine==='membrane') stepMembrane(clamp(c*c,0,0.5), gamma); else stepPlate(clamp(k,0,0.02), gamma); }}>Step +1</button>
+                <button className="px-3 py-1.5 rounded-xl bg-zinc-800 text-emerald-200 border border-emerald-700/40" onClick={reset}>Reset</button>
+                <button className="px-3 py-1.5 rounded-xl bg-zinc-800 text-emerald-200 border border-emerald-700/40" onClick={randomize}>Random</button>
+                <button className="px-3 py-1.5 rounded-xl bg-emerald-700 text-black" onClick={presetDrop}>Drop</button>
+                <button className="px-3 py-1.5 rounded-xl bg-emerald-700 text-black" onClick={presetTwoSources}>Two Sources</button>
+                <button className="px-3 py-1.5 rounded-xl bg-emerald-700 text-black" onClick={presetPlaneWave}>Plane Wave</button>
+                <button className="px-3 py-1.5 rounded-xl bg-emerald-500 text-black" onClick={exportPNG}>Save PNG</button>
+                <button className="px-3 py-1.5 rounded-xl bg-emerald-800 text-emerald-200 border border-emerald-700/40" onClick={async()=>{ try { if(!document.fullscreenElement){ await containerRef.current?.requestFullscreen?.({navigationUI:'hide'});} else { await document.exitFullscreen(); } } catch(e){ console.warn('Fullscreen not available',e);} }}>{isFs ? 'Exit Fullscreen' : 'Fullscreen'}</button>
+                <button className={\`px-3 py-1.5 rounded-xl \${vjMode? 'bg-emerald-500 text-black' : 'bg-zinc-800 text-emerald-200 border border-emerald-700/40'}\`} onClick={()=>setVjMode(v=>!v)}>{vjMode ? 'Exit VJ Mode' : 'VJ Mode'}</button>
+                {showFPS && (<span className="ml-auto text-sm text-emerald-400/80">FPS: {fps.current.fps.toFixed(1)}</span>)}
+              </div>
+            </div>
+
+            {!vjMode && (
+              <div className="space-y-4">
+                <div className="p-4 rounded-xl border border-emerald-700/40 bg-zinc-950/80">
+                  <div className="flex items-center justify-between mb-2">
+                    <h2 className="font-semibold text-emerald-300">Engine</h2>
+                    <BoundaryHint />
+                  </div>
+                  <div className="flex gap-2 mb-3">
+                    <button className={\`px-3 py-1.5 rounded-xl border \${engine==='membrane'?'bg-emerald-600 text-black':'bg-transparent text-emerald-200 border-emerald-700/40'}\`} onClick={()=>setEngine('membrane')}>Membrane</button>
+                    <button className={\`px-3 py-1.5 rounded-xl border \${engine==='plate'?'bg-emerald-600 text-black':'bg-transparent text-emerald-200 border-emerald-700/40'}\`} onClick={()=>setEngine('plate')}>Thin Plate</button>
+                  </div>
+
+                  <label className="block text-sm mb-1">Boundary</label>
+                  <select className="w-full border rounded-lg p-2 bg-black text-emerald-200 border-emerald-700/40 mb-3" value={boundary} onChange={e=>setBoundary(e.target.value)}>
+                    <option value="fixed">Fixed (Dirichlet)</option>
+                    <option value="reflective">Reflective (Neumann)</option>
+                    <option value="periodic">Periodic (Wrap)</option>
+                  </select>
+
+                  <label className="block text-sm mb-1">Resolution N×N (80–256)</label>
+                  <input type="range" min={80} max={256} step={8} value={N} onChange={e=>setN(parseInt(e.target.value))} className="w-full" />
+                  <div className="text-xs text-emerald-400/70 mb-3">Current: {N} × {N}</div>
+
+                  {engine==='membrane' ? (
+                    <>
+                      <label className="block text-sm mb-1">Wave Speed c (0.05–0.65)</label>
+                      <input type="range" min={0.05} max={0.65} step={0.01} value={c} onChange={e=>setC(parseFloat(e.target.value))} className="w-full" />
+                      <div className="text-xs text-emerald-400/70 mb-3">c = {c.toFixed(2)} (CFL-safe)</div>
+                    </>
+                  ) : (
+                    <>
+                      <label className="block text-sm mb-1">Stiffness k (0.000–0.020)</label>
+                      <input type="range" min={0} max={0.02} step={0.001} value={k} onChange={e=>setK(parseFloat(e.target.value))} className="w-full" />
+                      <div className="text-xs text-emerald-400/70 mb-3">k = {k.toFixed(3)} (too large → unstable)</div>
+                    </>
+                  )}
+
+                  <label className="block text-sm mb-1">Damping γ (0.000–0.050)</label>
+                  <input type="range" min={0} max={0.05} step={0.001} value={gamma} onChange={e=>setGamma(parseFloat(e.target.value))} className="w-full" />
+                  <div className="text-xs text-emerald-400/70 mb-3">γ = {gamma.toFixed(3)}</div>
+
+                  <label className="block text-sm mb-1">Steps / Frame (1–5)</label>
+                  <input type="range" min={1} max={5} step={1} value={stepsPerFrame} onChange={e=>setStepsPerFrame(parseInt(e.target.value))} className="w-full" />
+                  <div className="text-xs text-emerald-400/70 mb-3">{stepsPerFrame} step/frame</div>
+
+                  <label className="block text-sm mb-1">Amplitude → Color Scale</label>
+                  <input type="range" min={0.2} max={5} step={0.1} value={ampScale} onChange={e=>setAmpScale(parseFloat(e.target.value))} className="w-full" />
+                  <div className="text-xs text-emerald-400/70 mb-3">±{ampScale.toFixed(1)} mapped to full brightness</div>
+
+                  <div className="flex items-center gap-2 mb-2">
+                    <input id="fps" type="checkbox" checked={showFPS} onChange={e=>setShowFPS(e.target.checked)} />
+                    <label htmlFor="fps" className="text-sm">Show FPS</label>
+                  </div>
+                </div>
+
+                <div className="p-4 rounded-xl border border-emerald-700/40 bg-zinc-950/80">
+                  <h2 className="font-semibold text-emerald-300 mb-2">Brush</h2>
+                  <label className="block text-sm mb-1">Radius (cells)</label>
+                  <input type="range" min={1} max={24} step={1} value={brushRadius} onChange={e=>setBrushRadius(parseInt(e.target.value))} className="w-full" />
+                  <div className="text-xs text-emerald-400/70 mb-3">r = {brushRadius}</div>
+
+                  <label className="block text-sm mb-1">Power (amplitude)</label>
+                  <input type="range" min={0.1} max={4} step={0.1} value={brushPower} onChange={e=>setBrushPower(parseFloat(e.target.value))} className="w-full" />
+                  <div className="text-xs text-emerald-400/70">{brushPower.toFixed(1)}</div>
+                </div>
+
+                <div className="p-4 rounded-xl border border-emerald-700/40 bg-zinc-950/80">
+                  <h2 className="font-semibold text-emerald-300 mb-2">Neon Grid</h2>
+                  <div className="flex items-center gap-2 mb-2">
+                    <input id="grid" type="checkbox" checked={gridOn} onChange={e=>setGridOn(e.target.checked)} />
+                    <label htmlFor="grid" className="text-sm">Enable Grid</label>
+                  </div>
+                  <label className="block text-sm mb-1">Grid Opacity</label>
+                  <input type="range" min={0} max={0.6} step={0.01} value={gridOpacity} onChange={e=>setGridOpacity(parseFloat(e.target.value))} className="w-full" />
+                  <div className="text-xs text-emerald-400/70 mb-3">{gridOpacity.toFixed(2)}</div>
+
+                  <label className="block text-sm mb-1">Grid Glow</label>
+                  <input type="range" min={0} max={16} step={1} value={gridGlow} onChange={e=>setGridGlow(parseInt(e.target.value))} className="w-full" />
+                  <div className="text-xs text-emerald-400/70">{gridGlow}px</div>
+                </div>
+
+                <div className="p-4 rounded-xl border border-emerald-700/40 bg-zinc-950/80">
+                  <h2 className="font-semibold text-emerald-300 mb-2">Sequencer</h2>
+                  <div className="flex items-center gap-2 mb-2">
+                    <input id="seq" type="checkbox" checked={seqOn} onChange={e=>setSeqOn(e.target.checked)} />
+                    <label htmlFor="seq" className="text-sm">Enable</label>
+                  </div>
+
+                  <label className="block text-sm mb-1">Mode</label>
+                  <div className="flex gap-2 mb-3">
+                    <button className={\`px-3 py-1.5 rounded-xl border \${seqMode==='random'?'bg-emerald-600 text-black':'bg-transparent text-emerald-200 border-emerald-700/40'}\`} onClick={()=>setSeqMode('random')}>Random</button>
+                    <button className={\`px-3 py-1.5 rounded-xl border \${seqMode==='grid'?'bg-emerald-600 text-black':'bg-transparent text-emerald-200 border-emerald-700/40'}\`} onClick={()=>setSeqMode('grid')}>Grid</button>
+                  </div>
+
+                  <label className="block text-sm mb-1">Interval (sec)</label>
+                  <input type="range" min={0.05} max={2} step={0.05} value={seqInterval} onChange={e=>setSeqInterval(parseFloat(e.target.value))} className="w-full" />
+                  <div className="text-xs text-emerald-400/70 mb-3">{seqInterval.toFixed(2)} s</div>
+
+                  <label className="block text-sm mb-1">Pulse Radius</label>
+                  <input type="range" min={1} max={32} step={1} value={seqRadius} onChange={e=>setSeqRadius(parseInt(e.target.value))} className="w-full" />
+                  <div className="text-xs text-emerald-400/70 mb-3">r = {seqRadius}</div>
+
+                  <label className="block text-sm mb-1">Pulse Power</label>
+                  <input type="range" min={0.1} max={4} step={0.1} value={seqPower} onChange={e=>setSeqPower(parseFloat(e.target.value))} className="w-full" />
+                  <div className="text-xs text-emerald-400/70 mb-3">{seqPower.toFixed(1)}</div>
+
+                  {seqMode==='grid' && (
+                    <>
+                      <label className="block text-sm mb-1">Grid (cols × rows)</label>
+                      <div className="grid grid-cols-2 gap-2 mb-3">
+                        <input type="range" min={2} max={32} step={1} value={seqCols} onChange={e=>setSeqCols(parseInt(e.target.value))} />
+                        <input type="range" min={2} max={32} step={1} value={seqRows} onChange={e=>setSeqRows(parseInt(e.target.value))} />
+                      </div>
+                      <div className="text-xs text-emerald-400/70 mb-3">{seqCols} × {seqRows}</div>
+
+                      <div className="flex items-center gap-2 mb-2">
+                        <input id="zigzag" type="checkbox" checked={seqZigzag} onChange={e=>setSeqZigzag(e.target.checked)} />
+                        <label htmlFor="zigzag" className="text-sm">Snake Order</label>
+                      </div>
+
+                      <label className="block text-sm mb-1">Position Jitter (0–1)</label>
+                      <input type="range" min={0} max={1} step={0.01} value={seqJitter} onChange={e=>setSeqJitter(parseFloat(e.target.value))} className="w-full" />
+                      <div className="text-xs text-emerald-400/70">{seqJitter.toFixed(2)}</div>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {!vjMode && (
+            <footer className="mt-6 text-xs text-emerald-500/80">
+              MIT License © ${datetime.datetime.now().year} Matrix Vibration Lab. React + Canvas2D.
+            </footer>
+          )}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<MatrixVibrationLab />);
+  </script>
+</body>
+</html>
