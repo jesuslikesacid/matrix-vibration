@@ -16,7 +16,9 @@
 </head>
 <body class="bg-black">
   <div id="root"></div>
-  <script type="text/babel">
+
+  <!-- JSX app. IMPORTANT: data-presets enables JSX/ES transform in-browser -->
+  <script type="text/babel" data-presets="react,env">
     const {useEffect,useRef,useState} = React;
 
     const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
@@ -34,7 +36,7 @@
     }
 
     function MatrixVibrationLab() {
-      // ======== App state ========
+      // --- params ---
       const [engine, setEngine] = useState('membrane');
       const [N, setN] = useState(160);
       const [c, setC] = useState(0.35);
@@ -46,18 +48,18 @@
       const [running, setRunning] = useState(true);
       const [showFPS, setShowFPS] = useState(true);
 
-      // Brush
+      // brush
       const [brushRadius, setBrushRadius] = useState(6);
       const [brushPower, setBrushPower] = useState(1.0);
 
-      // Visual
+      // visual
       const [gridOn, setGridOn] = useState(true);
       const [gridOpacity, setGridOpacity] = useState(0.18);
       const [gridGlow, setGridGlow] = useState(6);
 
-      // Sequencer
+      // sequencer
       const [seqOn, setSeqOn] = useState(false);
-      const [seqMode, setSeqMode] = useState('random'); // random | grid
+      const [seqMode, setSeqMode] = useState('random');
       const [seqInterval, setSeqInterval] = useState(0.25);
       const [seqRadius, setSeqRadius] = useState(6);
       const [seqPower, setSeqPower] = useState(1.2);
@@ -67,11 +69,11 @@
       const [seqZigzag, setSeqZigzag] = useState(true);
       const gridStepRef = useRef(0);
 
-      // VJ / Fullscreen
+      // VJ/fullscreen
       const [vjMode, setVjMode] = useState(false);
       const [isFs, setIsFs] = useState(false);
 
-      // Canvas & buffers
+      // canvas/buffers
       const canvasRef = useRef(null);
       const containerRef = useRef(null);
       const gridRef = useRef(null);
@@ -79,7 +81,7 @@
       const buffers = useRef({ uPrev:null,uCurr:null,uNext:null,lap1:null,lap2:null });
       const fps = useRef({ last: performance.now(), frames:0, fps:0 });
 
-      // Resize / fullscreen
+      // listeners
       useEffect(() => {
         const onResize = () => { dpiRef.current = window.devicePixelRatio || 1; sizeCanvas(); drawGridOverlay(); };
         const onFs = () => { setIsFs(!!document.fullscreenElement); sizeCanvas(); drawGridOverlay(); };
@@ -88,7 +90,7 @@
         return () => { window.removeEventListener('resize', onResize); document.removeEventListener('fullscreenchange', onFs); };
       }, []);
 
-      // Allocate buffers on N/engine change
+      // allocate buffers
       useEffect(() => {
         const len = N*N;
         buffers.current.uPrev = new Float32Array(len);
@@ -103,31 +105,26 @@
         drawGridOverlay();
       }, [N, engine]);
 
-      // Helpers
+      // math helpers
       const idx = (x,y)=> y*N + x;
       const sample = (arr, x, y) => {
-        if (boundary === 'periodic') {
-          const xx=(x+N)%N, yy=(y+N)%N; return arr[idx(xx,yy)];
-        } else if (boundary === 'reflective') {
-          const xx = x<0?0:x>=N?N-1:x, yy = y<0?0:y>=N?N-1:y; return arr[idx(xx,yy)];
-        } else { // fixed
-          if (x<0||y<0||x>=N||y>=N) return 0; return arr[idx(x,y)];
-        }
+        if (boundary === 'periodic') { const xx=(x+N)%N, yy=(y+N)%N; return arr[idx(xx,yy)]; }
+        else if (boundary === 'reflective') { const xx=x<0?0:x>=N?N-1:x, yy=y<0?0:y>=N?N-1:y; return arr[idx(xx,yy)]; }
+        else { if (x<0||y<0||x>=N||y>=N) return 0; return arr[idx(x,y)]; }
       };
       const lap = (src, out) => {
         for (let y=0;y<N;y++) for (let x=0;x<N;x++) {
-          const u = src[idx(x,y)];
-          const l = sample(src,x-1,y), r=sample(src,x+1,y), u1=sample(src,x,y-1), d1=sample(src,x,y+1);
+          const u=src[idx(x,y)], l=sample(src,x-1,y), r=sample(src,x+1,y), u1=sample(src,x,y-1), d1=sample(src,x,y+1);
           out[idx(x,y)] = l + r + u1 + d1 - 4*u;
         }
       };
       const stepMembrane = (r,g) => {
-        const {uPrev,uCurr,uNext,lap1} = buffers.current; lap(uCurr,lap1); const L=N*N;
+        const {uPrev,uCurr,uNext,lap1}=buffers.current; lap(uCurr,lap1); const L=N*N;
         for (let i=0;i<L;i++){ const u=uCurr[i], up=uPrev[i]; uNext[i]=clamp(2*u - up + r*lap1[i] - g*(u-up), -100, 100); }
         buffers.current.uPrev=uCurr; buffers.current.uCurr=uNext; buffers.current.uNext=uPrev;
       };
       const stepPlate = (kk,g) => {
-        const {uPrev,uCurr,uNext,lap1,lap2} = buffers.current; lap(uCurr,lap1); lap(lap1,lap2); const L=N*N;
+        const {uPrev,uCurr,uNext,lap1,lap2}=buffers.current; lap(uCurr,lap1); lap(lap1,lap2); const L=N*N;
         for (let i=0;i<L;i++){ const u=uCurr[i], up=uPrev[i]; uNext[i]=clamp(2*u - up + kk*lap2[i] - g*(u-up), -100, 100); }
         buffers.current.uPrev=uCurr; buffers.current.uCurr=uNext; buffers.current.uNext=uPrev;
       };
@@ -140,8 +137,7 @@
         }
       };
 
-      // Sequencer
-      const gridStepRef = React.useRef(0);
+      // sequencer tick
       const triggerSequencer = () => {
         if (seqMode==='random') {
           const x=Math.floor(Math.random()*N), y=Math.floor(Math.random()*N);
@@ -166,7 +162,7 @@
         return () => clearInterval(id);
       }, [seqOn, seqInterval, seqMode, seqRadius, seqPower, seqCols, seqRows, seqJitter, seqZigzag, N, running]);
 
-      // Canvas size & grid
+      // canvas sizing & grid
       const sizeCanvas = () => {
         const canvas=canvasRef.current, parent=containerRef.current; if(!canvas||!parent) return;
         const rect = parent.getBoundingClientRect();
@@ -179,19 +175,17 @@
         const canvas=canvasRef.current; if (!canvas) return;
         const W=canvas.width, H=canvas.height;
         const grid=document.createElement('canvas'); grid.width=W; grid.height=H;
-        const g=grid.getContext('2d');
-        g.clearRect(0,0,W,H);
+        const g=grid.getContext('2d'); g.clearRect(0,0,W,H);
         const stepX=W/N, stepY=H/N;
         g.strokeStyle = `rgba(0,255,140,${gridOpacity})`;
         g.lineWidth = Math.max(1, Math.floor(Math.min(stepX, stepY) * 0.02));
-        g.shadowColor='rgba(0,255,140,0.7)';
-        g.shadowBlur=gridGlow;
+        g.shadowColor='rgba(0,255,140,0.7)'; g.shadowBlur=gridGlow;
         for (let i=0;i<=N;i++){ const x=Math.round(i*stepX)+0.5; g.beginPath(); g.moveTo(x,0); g.lineTo(x,H); g.stroke(); }
         for (let j=0;j<=N;j++){ const y=Math.round(j*stepY)+0.5; g.beginPath(); g.moveTo(0,y); g.lineTo(W,y); g.stroke(); }
         gridRef.current=grid;
       };
 
-      // Pointer input
+      // pointer input
       useEffect(() => {
         const canvas=canvasRef.current; if (!canvas) return; let drawing=false;
         const toCell = (e) => {
@@ -209,7 +203,7 @@
         return ()=>{ canvas.removeEventListener('pointerdown',down); window.removeEventListener('pointermove',move); window.removeEventListener('pointerup',up); };
       }, [N, brushRadius, brushPower]);
 
-      // Shortcuts
+      // shortcuts
       useEffect(() => {
         const onKey=(e)=>{
           if (e.key===' ') { e.preventDefault(); setRunning(v=>!v); }
@@ -220,7 +214,7 @@
         return ()=> window.removeEventListener('keydown', onKey);
       }, []);
 
-      // Render loop
+      // render loop
       useRaf(() => {
         for (let s=0;s<stepsPerFrame;s++){
           if (engine==='membrane') stepMembrane(clamp(c*c,0,0.5), gamma);
@@ -228,9 +222,7 @@
         }
         const canvas=canvasRef.current; if(!canvas) return;
         const ctx=canvas.getContext('2d'); const W=canvas.width,H=canvas.height;
-
         ctx.fillStyle='#000'; ctx.fillRect(0,0,W,H);
-
         const {uCurr}=buffers.current; const img=ctx.createImageData(W,H);
         for (let py=0;py<H;py++){
           const gy=Math.floor((py/H)*N);
@@ -244,18 +236,16 @@
           }
         }
         ctx.putImageData(img,0,0);
-
         if (gridOn && gridRef.current) {
           ctx.globalCompositeOperation='screen';
           ctx.drawImage(gridRef.current,0,0);
           ctx.globalCompositeOperation='source-over';
         }
-
         const now=performance.now(); fps.current.frames++;
         if (now-fps.current.last>=500){ fps.current.fps=(fps.current.frames*1000)/(now-fps.current.last); fps.current.frames=0; fps.current.last=now; }
       }, running);
 
-      // Actions
+      // actions
       const reset = ()=>{ buffers.current.uPrev.fill(0); buffers.current.uCurr.fill(0); buffers.current.uNext.fill(0); };
       const randomize = ()=>{ const L=N*N; for (let i=0;i<L;i++) buffers.current.uCurr[i]=(Math.random()-0.5)*0.4; buffers.current.uPrev.set(buffers.current.uCurr); };
       const presetDrop = ()=>{ paintImpulse(Math.floor(N/2),Math.floor(N/2),Math.floor(N*0.08),2.0); };
@@ -436,13 +426,14 @@
 
           {!vjMode && (
             <footer className="mt-6 text-xs text-emerald-500/80">
-              MIT License © <script>document.write(new Date().getFullYear())</script> Matrix Vibration Lab. React + Canvas2D.
+              MIT License © {new Date().getFullYear()} Matrix Vibration Lab. React + Canvas2D.
             </footer>
           )}
         </div>
       );
     }
 
+    // **** FINAL RENDER CALL (this was missing) ****
     ReactDOM.createRoot(document.getElementById('root')).render(<MatrixVibrationLab />);
   </script>
 </body>
