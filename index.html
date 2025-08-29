@@ -57,6 +57,14 @@
       const [gridOpacity, setGridOpacity] = useState(0.18);
       const [gridGlow, setGridGlow] = useState(6);
 
+      // VJ FX
+      const [fxOn, setFxOn] = useState(true);
+      const [fxTiles, setFxTiles] = useState(2); // mirror tiling per axis
+      const [fxBloom, setFxBloom] = useState(0.6); // 0..1
+      const [fxChromShift, setFxChromShift] = useState(2); // px
+      const [fxHueDrift, setFxHueDrift] = useState(0.08); // color rotation speed
+      const [colorMap, setColorMap] = useState('prism'); // prism|aqua|flame
+
       // sequencer
       const [seqOn, setSeqOn] = useState(false);
       const [seqMode, setSeqMode] = useState('random');
@@ -80,6 +88,9 @@
       const dpiRef = useRef(window.devicePixelRatio || 1);
       const buffers = useRef({ uPrev:null,uCurr:null,uNext:null,lap1:null,lap2:null });
       const fps = useRef({ last: performance.now(), frames:0, fps:0 });
+      const fxCanvasRef = useRef(null); // snapshot for FX compositing
+      const bloomCanvasRef = useRef(null); // low-res bloom buffer
+      const tRef = useRef(0);
 
       // listeners
       useEffect(() => {
@@ -170,6 +181,12 @@
         canvas.style.width = size+'px'; canvas.style.height=size+'px';
         canvas.width=Math.round(size*dpr); canvas.height=Math.round(size*dpr);
         canvas.style.imageRendering='pixelated';
+        // prepare offscreen buffers
+        if (!fxCanvasRef.current) fxCanvasRef.current=document.createElement('canvas');
+        if (!bloomCanvasRef.current) bloomCanvasRef.current=document.createElement('canvas');
+        fxCanvasRef.current.width=canvas.width; fxCanvasRef.current.height=canvas.height;
+        bloomCanvasRef.current.width=Math.max(1, Math.floor(canvas.width/2));
+        bloomCanvasRef.current.height=Math.max(1, Math.floor(canvas.height/2));
       };
       const drawGridOverlay = () => {
         const canvas=canvasRef.current; if (!canvas) return;
@@ -214,6 +231,23 @@
         return ()=> window.removeEventListener('keydown', onKey);
       }, []);
 
+      // HSV helpers for colorful palettes
+      const hsv2rgb = (h,s,v)=>{
+        let i=Math.floor(h*6), f=h*6-i; const p=v*(1-s), q=v*(1-f*s), t=v*(1-(1-f)*s); i%=6;
+        const out=[[v,t,p],[q,v,p],[p,v,t],[p,q,v],[t,p,v],[v,p,q]][i];
+        return [(out[0]*255)|0,(out[1]*255)|0,(out[2]*255)|0];
+      };
+      const colorize = (val, t)=>{
+        const a=clamp(Math.abs(val)/ampScale,0,1);
+        if (colorMap==='aqua'){
+          const h=(0.52 + 0.18*a + 0.10*Math.sin(t*3.2))%1; return hsv2rgb(h,0.95, Math.pow(a,0.55));
+        } else if (colorMap==='flame'){
+          const h=(0.02 + 0.16*a + 0.08*Math.sin(t*2.1))%1; return hsv2rgb(h,1.0, Math.pow(a,0.7));
+        } else { // prism
+          const h=(t*0.08 + a*0.85)%1; return hsv2rgb(h,0.98, Math.pow(a,0.6));
+        }
+      };
+
       // render loop
       useRaf(() => {
         for (let s=0;s<stepsPerFrame;s++){
@@ -224,18 +258,55 @@
         const ctx=canvas.getContext('2d'); const W=canvas.width,H=canvas.height;
         ctx.fillStyle='#000'; ctx.fillRect(0,0,W,H);
         const {uCurr}=buffers.current; const img=ctx.createImageData(W,H);
+        const t=tRef.current; tRef.current += fxHueDrift*0.01;
         for (let py=0;py<H;py++){
           const gy=Math.floor((py/H)*N);
           for (let px=0;px<W;px++){
             const gx=Math.floor((px/W)*N); const v=uCurr[idx(gx,gy)];
-            const intensity=clamp(Math.abs(v)/ampScale,0,1);
-            const sgn=v>=0?1.0:0.7;
-            const gval=Math.pow(intensity,0.55)*255;
-            const r=gval*0.08*sgn, b=gval*0.18*(1-0.3*sgn);
-            const o=(py*W+px)*4; img.data[o]=r|0; img.data[o+1]=gval|0; img.data[o+2]=b|0; img.data[o+3]=255;
+            const [r,g,b]=colorize(v,t);
+            const o=(py*W+px)*4; img.data[o]=r; img.data[o+1]=g; img.data[o+2]=b; img.data[o+3]=255;
           }
         }
         ctx.putImageData(img,0,0);
+        // FX composite: snapshot → mirror tiles → bloom → chromatic
+        if (fxOn) {
+          const snap = fxCanvasRef.current; if (snap){
+            const sctx=snap.getContext('2d'); sctx.clearRect(0,0,snap.width,snap.height); sctx.drawImage(canvas,0,0);
+            // mirror tiling
+            const tiles=Math.max(1, fxTiles|0); const tileW=Math.floor(W/tiles), tileH=Math.floor(H/tiles);
+            ctx.save(); ctx.clearRect(0,0,W,H); ctx.fillStyle='#000'; ctx.fillRect(0,0,W,H);
+            for (let ty=0; ty<tiles; ty++){
+              for (let tx=0; tx<tiles; tx++){
+                ctx.save(); const x=tx*tileW, y=ty*tileH; const flipX=(tx%2)===1, flipY=(ty%2)===1;
+                ctx.translate(x + (flipX?tileW:0), y + (flipY?tileH:0));
+                ctx.scale(flipX?-1:1, flipY?-1:1);
+                ctx.drawImage(snap, 0, 0, tileW, tileH);
+                ctx.restore();
+              }
+            }
+            // subtle floor reflection
+            ctx.save(); ctx.globalAlpha=0.35; ctx.translate(0,H*2); ctx.scale(1,-1); ctx.filter='blur(2px)';
+            ctx.drawImage(snap,0,0,W,Math.floor(H*0.5)); ctx.filter='none'; ctx.globalAlpha=1; ctx.restore();
+            ctx.restore();
+
+            // bloom
+            if (fxBloom>0.01){
+              const bloom=bloomCanvasRef.current; const bctx=bloom.getContext('2d');
+              bctx.clearRect(0,0,bloom.width,bloom.height);
+              bctx.filter=`brightness(170%) saturate(220%) blur(${Math.round(8*fxBloom)}px)`;
+              bctx.drawImage(snap,0,0,bloom.width,bloom.height); bctx.filter='none';
+              ctx.globalCompositeOperation='screen'; ctx.globalAlpha=0.2 + fxBloom*0.6; ctx.drawImage(bloom,0,0,W,H);
+              ctx.globalAlpha=1; ctx.globalCompositeOperation='source-over';
+            }
+
+            // chromatic aberration
+            if (fxChromShift>0){ const d=fxChromShift; ctx.globalCompositeOperation='lighter';
+              ctx.filter='hue-rotate(25deg) saturate(150%)'; ctx.drawImage(snap,d,0,W,H);
+              ctx.filter='hue-rotate(-25deg) saturate(150%)'; ctx.drawImage(snap,-d,0,W,H);
+              ctx.filter='none'; ctx.globalCompositeOperation='source-over'; }
+          }
+        }
+        // draw grid overlay last for crisp lines
         if (gridOn && gridRef.current) {
           ctx.globalCompositeOperation='screen';
           ctx.drawImage(gridRef.current,0,0);
@@ -246,6 +317,9 @@
       }, running);
 
       // actions
+      const presetMirrorRoom = ()=>{
+        setFxOn(true); setFxTiles(3); setFxBloom(0.8); setFxChromShift(3); setFxHueDrift(0.12); setColorMap('prism'); setGridOn(false);
+      };
       const reset = ()=>{ buffers.current.uPrev.fill(0); buffers.current.uCurr.fill(0); buffers.current.uNext.fill(0); };
       const randomize = ()=>{ const L=N*N; for (let i=0;i<L;i++) buffers.current.uCurr[i]=(Math.random()-0.5)*0.4; buffers.current.uPrev.set(buffers.current.uCurr); };
       const presetDrop = ()=>{ paintImpulse(Math.floor(N/2),Math.floor(N/2),Math.floor(N*0.08),2.0); };
@@ -373,6 +447,38 @@
                   <label className="block text-sm mb-1">Grid Glow</label>
                   <input type="range" min={0} max={16} step={1} value={gridGlow} onChange={e=>setGridGlow(parseInt(e.target.value))} className="w-full" />
                   <div className="text-xs text-emerald-400/70">{gridGlow}px</div>
+                </div>
+
+                <div className="p-4 rounded-xl border border-emerald-700/40 bg-zinc-950/80">
+                  <h2 className="font-semibold text-emerald-300 mb-2">Visual FX</h2>
+                  <div className="flex items-center gap-2 mb-3">
+                    <input id="fx" type="checkbox" checked={fxOn} onChange={e=>setFxOn(e.target.checked)} />
+                    <label htmlFor="fx" className="text-sm">Enable FX (Mirror/Bloom/Chromatic)</label>
+                  </div>
+                  <button className="mb-3 px-3 py-1.5 rounded-xl bg-fuchsia-600 text-black font-semibold shadow-[0_0_20px_#ff4df2]" onClick={presetMirrorRoom}>Mirror Room Preset</button>
+
+                  <label className="block text-sm mb-1">Color Map</label>
+                  <div className="flex gap-2 mb-3">
+                    <button className={`px-3 py-1.5 rounded-xl border ${colorMap==='prism'?'bg-emerald-600 text-black':'bg-transparent text-emerald-200 border-emerald-700/40'}`} onClick={()=>setColorMap('prism')}>Prism</button>
+                    <button className={`px-3 py-1.5 rounded-xl border ${colorMap==='aqua'?'bg-emerald-600 text-black':'bg-transparent text-emerald-200 border-emerald-700/40'}`} onClick={()=>setColorMap('aqua')}>Aqua</button>
+                    <button className={`px-3 py-1.5 rounded-xl border ${colorMap==='flame'?'bg-emerald-600 text-black':'bg-transparent text-emerald-200 border-emerald-700/40'}`} onClick={()=>setColorMap('flame')}>Flame</button>
+                  </div>
+
+                  <label className="block text-sm mb-1">Hue Drift Speed</label>
+                  <input type="range" min={0} max={0.3} step={0.005} value={fxHueDrift} onChange={e=>setFxHueDrift(parseFloat(e.target.value))} className="w-full" />
+                  <div className="text-xs text-emerald-400/70 mb-3">{fxHueDrift.toFixed(3)}</div>
+
+                  <label className="block text-sm mb-1">Mirror Tiles per Axis</label>
+                  <input type="range" min={1} max={4} step={1} value={fxTiles} onChange={e=>setFxTiles(parseInt(e.target.value))} className="w-full" />
+                  <div className="text-xs text-emerald-400/70 mb-3">{fxTiles} × {fxTiles}</div>
+
+                  <label className="block text-sm mb-1">Bloom Strength</label>
+                  <input type="range" min={0} max={1} step={0.01} value={fxBloom} onChange={e=>setFxBloom(parseFloat(e.target.value))} className="w-full" />
+                  <div className="text-xs text-emerald-400/70 mb-3">{fxBloom.toFixed(2)}</div>
+
+                  <label className="block text-sm mb-1">Chromatic Shift (px)</label>
+                  <input type="range" min={0} max={8} step={1} value={fxChromShift} onChange={e=>setFxChromShift(parseInt(e.target.value))} className="w-full" />
+                  <div className="text-xs text-emerald-400/70">{fxChromShift}px</div>
                 </div>
 
                 <div className="p-4 rounded-xl border border-emerald-700/40 bg-zinc-950/80">
