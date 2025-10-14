@@ -57,6 +57,23 @@
       const [gridOpacity, setGridOpacity] = useState(0.18);
       const [gridGlow, setGridGlow] = useState(6);
 
+      // VJ FX
+      const [fxOn, setFxOn] = useState(true);
+      const [fxTiles, setFxTiles] = useState(2); // mirror tiling per axis
+      const [fxBloom, setFxBloom] = useState(0.6); // 0..1
+      const [fxChromShift, setFxChromShift] = useState(2); // px
+      const [fxHueDrift, setFxHueDrift] = useState(0.08); // color rotation speed
+      const [colorMap, setColorMap] = useState('prism'); // prism|aqua|flame
+
+      // Cubes grid
+      const [cubeOn, setCubeOn] = useState(true);
+      const [cubeCols, setCubeCols] = useState(7);
+      const [cubeRows, setCubeRows] = useState(3);
+      const [cubeSize, setCubeSize] = useState(0.14); // base size relative to width
+      const [cubePersp, setCubePersp] = useState(0.5); // 0..1 depth compression
+      const [cubeReflect, setCubeReflect] = useState(0.45); // floor reflection strength
+      const [cubeGlow, setCubeGlow] = useState(10); // edge glow px
+
       // sequencer
       const [seqOn, setSeqOn] = useState(false);
       const [seqMode, setSeqMode] = useState('random');
@@ -80,6 +97,9 @@
       const dpiRef = useRef(window.devicePixelRatio || 1);
       const buffers = useRef({ uPrev:null,uCurr:null,uNext:null,lap1:null,lap2:null });
       const fps = useRef({ last: performance.now(), frames:0, fps:0 });
+      const fxCanvasRef = useRef(null); // snapshot for FX compositing
+      const bloomCanvasRef = useRef(null); // low-res bloom buffer
+      const tRef = useRef(0);
 
       // listeners
       useEffect(() => {
@@ -170,6 +190,12 @@
         canvas.style.width = size+'px'; canvas.style.height=size+'px';
         canvas.width=Math.round(size*dpr); canvas.height=Math.round(size*dpr);
         canvas.style.imageRendering='pixelated';
+        // prepare offscreen buffers
+        if (!fxCanvasRef.current) fxCanvasRef.current=document.createElement('canvas');
+        if (!bloomCanvasRef.current) bloomCanvasRef.current=document.createElement('canvas');
+        fxCanvasRef.current.width=canvas.width; fxCanvasRef.current.height=canvas.height;
+        bloomCanvasRef.current.width=Math.max(1, Math.floor(canvas.width/2));
+        bloomCanvasRef.current.height=Math.max(1, Math.floor(canvas.height/2));
       };
       const drawGridOverlay = () => {
         const canvas=canvasRef.current; if (!canvas) return;
@@ -214,6 +240,98 @@
         return ()=> window.removeEventListener('keydown', onKey);
       }, []);
 
+      // HSV helpers for colorful palettes
+      const hsv2rgb = (h,s,v)=>{
+        let i=Math.floor(h*6), f=h*6-i; const p=v*(1-s), q=v*(1-f*s), t=v*(1-(1-f)*s); i%=6;
+        const out=[[v,t,p],[q,v,p],[p,v,t],[p,q,v],[t,p,v],[v,p,q]][i];
+        return [(out[0]*255)|0,(out[1]*255)|0,(out[2]*255)|0];
+      };
+      const colorize = (val, t)=>{
+        const a=clamp(Math.abs(val)/ampScale,0,1);
+        if (colorMap==='aqua'){
+          const h=(0.52 + 0.18*a + 0.10*Math.sin(t*3.2))%1; return hsv2rgb(h,0.95, Math.pow(a,0.55));
+        } else if (colorMap==='flame'){
+          const h=(0.02 + 0.16*a + 0.08*Math.sin(t*2.1))%1; return hsv2rgb(h,1.0, Math.pow(a,0.7));
+        } else { // prism
+          const h=(t*0.08 + a*0.85)%1; return hsv2rgb(h,0.98, Math.pow(a,0.6));
+        }
+      };
+
+      // draw helper: rounded rectangle path
+      const roundRectPath = (g, x, y, w, h, r)=>{
+        r=Math.min(r, w*0.5, h*0.5);
+        g.beginPath();
+        g.moveTo(x+r, y);
+        g.arcTo(x+w, y, x+w, y+h, r);
+        g.arcTo(x+w, y+h, x, y+h, r);
+        g.arcTo(x, y+h, x, y, r);
+        g.arcTo(x, y, x+w, y, r);
+        g.closePath();
+      };
+
+      // draw one cube at (x,y) center with size s (px)
+      const drawCube = (ctx, snap, x, y, s, t)=>{
+        const half=s*0.5; const rad=s*0.14;
+        // inner content (snapshot)
+        ctx.save();
+        roundRectPath(ctx, x-half, y-half, s, s, rad);
+        ctx.clip();
+        // slight rotation/offset for dynamic look
+        const ang=0.2*Math.sin(t*1.2 + (x+y)*1e-4);
+        ctx.translate(x, y); ctx.rotate(ang);
+        const k=1.25; // zoom snapshot inside
+        const dx = (Math.sin(t*0.7 + x*0.002)*0.12 + 0.02)*s;
+        const dy = (Math.cos(t*0.8 + y*0.002)*0.12 + 0.02)*s;
+        ctx.drawImage(snap, -k*s+dx, -k*s+dy, 2*k*s, 2*k*s);
+        ctx.restore();
+
+        // neon frame
+        const grad=ctx.createLinearGradient(x-half,y-half,x+half,y+half);
+        grad.addColorStop(0,'#ff6bd1');
+        grad.addColorStop(0.5,'#66ffd6');
+        grad.addColorStop(1,'#6aa8ff');
+        ctx.lineWidth=Math.max(2, s*0.06);
+        ctx.strokeStyle=grad;
+        ctx.shadowColor='rgba(255,120,220,0.65)';
+        ctx.shadowBlur=cubeGlow;
+        roundRectPath(ctx, x-half, y-half, s, s, rad);
+        ctx.stroke();
+        ctx.shadowBlur=0;
+      };
+
+      const renderCubes = (ctx, snap, W, H, t)=>{
+        const cols=Math.max(1, cubeCols|0), rows=Math.max(1, cubeRows|0);
+        const baseS = cubeSize * W;
+        const horizon = H*0.42; // vanishing line
+        const baseY = H*0.78;    // foreground floor level
+        for (let r=0;r<rows;r++){
+          const z = rows<=1 ? 0 : r/(rows-1);
+          const scale = 1 - cubePersp*0.65*z; // shrink with depth
+          const y = baseY - (baseY-horizon)*z;
+          const widthShrink = 1 - cubePersp*0.45*z;
+          const s = baseS*scale;
+          const spacing = (W*0.8)/cols; // base span
+          for (let c=0;c<cols;c++){
+            const nx = (c+0.5)/cols - 0.5; // -0.5..0.5
+            const x = W*0.5 + nx*(W*0.8)*widthShrink;
+
+            // reflection first (under the cube)
+            if (cubeReflect>0){
+              ctx.save();
+              ctx.globalAlpha = clamp(cubeReflect*(1 - 0.8*z), 0, 1);
+              ctx.filter='blur(2px)';
+              ctx.translate(0, y*2); ctx.scale(1,-1);
+              drawCube(ctx, snap, x, y, s, t);
+              ctx.filter='none';
+              ctx.restore();
+            }
+
+            // actual cube
+            drawCube(ctx, snap, x, y, s, t);
+          }
+        }
+      };
+
       // render loop
       useRaf(() => {
         for (let s=0;s<stepsPerFrame;s++){
@@ -224,18 +342,60 @@
         const ctx=canvas.getContext('2d'); const W=canvas.width,H=canvas.height;
         ctx.fillStyle='#000'; ctx.fillRect(0,0,W,H);
         const {uCurr}=buffers.current; const img=ctx.createImageData(W,H);
+        const t=tRef.current; tRef.current += fxHueDrift*0.01;
         for (let py=0;py<H;py++){
           const gy=Math.floor((py/H)*N);
           for (let px=0;px<W;px++){
             const gx=Math.floor((px/W)*N); const v=uCurr[idx(gx,gy)];
-            const intensity=clamp(Math.abs(v)/ampScale,0,1);
-            const sgn=v>=0?1.0:0.7;
-            const gval=Math.pow(intensity,0.55)*255;
-            const r=gval*0.08*sgn, b=gval*0.18*(1-0.3*sgn);
-            const o=(py*W+px)*4; img.data[o]=r|0; img.data[o+1]=gval|0; img.data[o+2]=b|0; img.data[o+3]=255;
+            const [r,g,b]=colorize(v,t);
+            const o=(py*W+px)*4; img.data[o]=r; img.data[o+1]=g; img.data[o+2]=b; img.data[o+3]=255;
           }
         }
         ctx.putImageData(img,0,0);
+        // FX composite: snapshot → mirror tiles → bloom → chromatic
+        if (fxOn) {
+          const snap = fxCanvasRef.current; if (snap){
+            const sctx=snap.getContext('2d'); sctx.clearRect(0,0,snap.width,snap.height); sctx.drawImage(canvas,0,0);
+            // mirror tiling
+            const tiles=Math.max(1, fxTiles|0); const tileW=Math.floor(W/tiles), tileH=Math.floor(H/tiles);
+            ctx.save(); ctx.clearRect(0,0,W,H); ctx.fillStyle='#000'; ctx.fillRect(0,0,W,H);
+            for (let ty=0; ty<tiles; ty++){
+              for (let tx=0; tx<tiles; tx++){
+                ctx.save(); const x=tx*tileW, y=ty*tileH; const flipX=(tx%2)===1, flipY=(ty%2)===1;
+                ctx.translate(x + (flipX?tileW:0), y + (flipY?tileH:0));
+                ctx.scale(flipX?-1:1, flipY?-1:1);
+                ctx.drawImage(snap, 0, 0, tileW, tileH);
+                ctx.restore();
+              }
+            }
+            // subtle floor reflection
+            ctx.save(); ctx.globalAlpha=0.35; ctx.translate(0,H*2); ctx.scale(1,-1); ctx.filter='blur(2px)';
+            ctx.drawImage(snap,0,0,W,Math.floor(H*0.5)); ctx.filter='none'; ctx.globalAlpha=1; ctx.restore();
+            ctx.restore();
+
+            // bloom
+            if (fxBloom>0.01){
+              const bloom=bloomCanvasRef.current; const bctx=bloom.getContext('2d');
+              bctx.clearRect(0,0,bloom.width,bloom.height);
+              bctx.filter=`brightness(170%) saturate(220%) blur(${Math.round(8*fxBloom)}px)`;
+              bctx.drawImage(snap,0,0,bloom.width,bloom.height); bctx.filter='none';
+              ctx.globalCompositeOperation='screen'; ctx.globalAlpha=0.2 + fxBloom*0.6; ctx.drawImage(bloom,0,0,W,H);
+              ctx.globalAlpha=1; ctx.globalCompositeOperation='source-over';
+            }
+
+            // chromatic aberration
+            if (fxChromShift>0){ const d=fxChromShift; ctx.globalCompositeOperation='lighter';
+              ctx.filter='hue-rotate(25deg) saturate(150%)'; ctx.drawImage(snap,d,0,W,H);
+              ctx.filter='hue-rotate(-25deg) saturate(150%)'; ctx.drawImage(snap,-d,0,W,H);
+              ctx.filter='none'; ctx.globalCompositeOperation='source-over'; }
+
+            // cube grid in front
+            if (cubeOn) {
+              renderCubes(ctx, snap, W, H, t);
+            }
+          }
+        }
+        // draw grid overlay last for crisp lines
         if (gridOn && gridRef.current) {
           ctx.globalCompositeOperation='screen';
           ctx.drawImage(gridRef.current,0,0);
@@ -246,6 +406,9 @@
       }, running);
 
       // actions
+      const presetMirrorRoom = ()=>{
+        setFxOn(true); setFxTiles(3); setFxBloom(0.8); setFxChromShift(3); setFxHueDrift(0.12); setColorMap('prism'); setGridOn(false);
+      };
       const reset = ()=>{ buffers.current.uPrev.fill(0); buffers.current.uCurr.fill(0); buffers.current.uNext.fill(0); };
       const randomize = ()=>{ const L=N*N; for (let i=0;i<L;i++) buffers.current.uCurr[i]=(Math.random()-0.5)*0.4; buffers.current.uPrev.set(buffers.current.uCurr); };
       const presetDrop = ()=>{ paintImpulse(Math.floor(N/2),Math.floor(N/2),Math.floor(N*0.08),2.0); };
@@ -373,6 +536,69 @@
                   <label className="block text-sm mb-1">Grid Glow</label>
                   <input type="range" min={0} max={16} step={1} value={gridGlow} onChange={e=>setGridGlow(parseInt(e.target.value))} className="w-full" />
                   <div className="text-xs text-emerald-400/70">{gridGlow}px</div>
+                </div>
+
+                <div className="p-4 rounded-xl border border-emerald-700/40 bg-zinc-950/80">
+                  <h2 className="font-semibold text-emerald-300 mb-2">Visual FX</h2>
+                  <div className="flex items-center gap-2 mb-3">
+                    <input id="fx" type="checkbox" checked={fxOn} onChange={e=>setFxOn(e.target.checked)} />
+                    <label htmlFor="fx" className="text-sm">Enable FX (Mirror/Bloom/Chromatic)</label>
+                  </div>
+                  <button className="mb-3 px-3 py-1.5 rounded-xl bg-fuchsia-600 text-black font-semibold shadow-[0_0_20px_#ff4df2]" onClick={presetMirrorRoom}>Mirror Room Preset</button>
+
+                  <label className="block text-sm mb-1">Color Map</label>
+                  <div className="flex gap-2 mb-3">
+                    <button className={`px-3 py-1.5 rounded-xl border ${colorMap==='prism'?'bg-emerald-600 text-black':'bg-transparent text-emerald-200 border-emerald-700/40'}`} onClick={()=>setColorMap('prism')}>Prism</button>
+                    <button className={`px-3 py-1.5 rounded-xl border ${colorMap==='aqua'?'bg-emerald-600 text-black':'bg-transparent text-emerald-200 border-emerald-700/40'}`} onClick={()=>setColorMap('aqua')}>Aqua</button>
+                    <button className={`px-3 py-1.5 rounded-xl border ${colorMap==='flame'?'bg-emerald-600 text-black':'bg-transparent text-emerald-200 border-emerald-700/40'}`} onClick={()=>setColorMap('flame')}>Flame</button>
+                  </div>
+
+                  <label className="block text-sm mb-1">Hue Drift Speed</label>
+                  <input type="range" min={0} max={0.3} step={0.005} value={fxHueDrift} onChange={e=>setFxHueDrift(parseFloat(e.target.value))} className="w-full" />
+                  <div className="text-xs text-emerald-400/70 mb-3">{fxHueDrift.toFixed(3)}</div>
+
+                  <label className="block text-sm mb-1">Mirror Tiles per Axis</label>
+                  <input type="range" min={1} max={4} step={1} value={fxTiles} onChange={e=>setFxTiles(parseInt(e.target.value))} className="w-full" />
+                  <div className="text-xs text-emerald-400/70 mb-3">{fxTiles} × {fxTiles}</div>
+
+                  <label className="block text-sm mb-1">Bloom Strength</label>
+                  <input type="range" min={0} max={1} step={0.01} value={fxBloom} onChange={e=>setFxBloom(parseFloat(e.target.value))} className="w-full" />
+                  <div className="text-xs text-emerald-400/70 mb-3">{fxBloom.toFixed(2)}</div>
+
+                  <label className="block text-sm mb-1">Chromatic Shift (px)</label>
+                  <input type="range" min={0} max={8} step={1} value={fxChromShift} onChange={e=>setFxChromShift(parseInt(e.target.value))} className="w-full" />
+                  <div className="text-xs text-emerald-400/70">{fxChromShift}px</div>
+                </div>
+
+                <div className="p-4 rounded-xl border border-emerald-700/40 bg-zinc-950/80">
+                  <h2 className="font-semibold text-emerald-300 mb-2">Cube Grid</h2>
+                  <div className="flex items-center gap-2 mb-3">
+                    <input id="cubeOn" type="checkbox" checked={cubeOn} onChange={e=>setCubeOn(e.target.checked)} />
+                    <label htmlFor="cubeOn" className="text-sm">Enable Cubes</label>
+                  </div>
+
+                  <label className="block text-sm mb-1">Columns / Rows</label>
+                  <div className="grid grid-cols-2 gap-2 mb-3">
+                    <input type="range" min={3} max={12} step={1} value={cubeCols} onChange={e=>setCubeCols(parseInt(e.target.value))} />
+                    <input type="range" min={1} max={6} step={1} value={cubeRows} onChange={e=>setCubeRows(parseInt(e.target.value))} />
+                  </div>
+                  <div className="text-xs text-emerald-400/70 mb-3">{cubeCols} × {cubeRows}</div>
+
+                  <label className="block text-sm mb-1">Base Size (rel. to width)</label>
+                  <input type="range" min={0.06} max={0.24} step={0.01} value={cubeSize} onChange={e=>setCubeSize(parseFloat(e.target.value))} className="w-full" />
+                  <div className="text-xs text-emerald-400/70 mb-3">{(cubeSize*100).toFixed(0)}%</div>
+
+                  <label className="block text-sm mb-1">Perspective Depth</label>
+                  <input type="range" min={0} max={1} step={0.01} value={cubePersp} onChange={e=>setCubePersp(parseFloat(e.target.value))} className="w-full" />
+                  <div className="text-xs text-emerald-400/70 mb-3">{cubePersp.toFixed(2)}</div>
+
+                  <label className="block text-sm mb-1">Reflection Strength</label>
+                  <input type="range" min={0} max={1} step={0.01} value={cubeReflect} onChange={e=>setCubeReflect(parseFloat(e.target.value))} className="w-full" />
+                  <div className="text-xs text-emerald-400/70 mb-3">{cubeReflect.toFixed(2)}</div>
+
+                  <label className="block text-sm mb-1">Edge Glow</label>
+                  <input type="range" min={0} max={20} step={1} value={cubeGlow} onChange={e=>setCubeGlow(parseInt(e.target.value))} className="w-full" />
+                  <div className="text-xs text-emerald-400/70">{cubeGlow}px</div>
                 </div>
 
                 <div className="p-4 rounded-xl border border-emerald-700/40 bg-zinc-950/80">
