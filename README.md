@@ -1,29 +1,35 @@
-# Matrix Grid Vibration Lab
+# PRISMatrix (pd~ patch lab)
 
-ネオングリーンの“マトリックス格子”で 2D 振動を可視化するブラウザツール。  
-ランダム/規則的シーケンサー、フルスクリーン、VJモード対応。**ビルド不要・単一 `index.html`** です。
+ARGOPd / Ofelia / EYESY にインスパイアされた、**Pure Data 風のオペレーターグラフで駆動するオーディオ反応ネオングリッド**。
+単一 `index.html` で完結し、React + Canvas2D 上で metro / osc~ / env~ / sh~ / bp~ ノードを組んだパッチを切替えて、マイク入力とカラーグレーディングを操れます。
+
+## どんなもの？
+- **パッチライブラリ (pd~)**: 
+  - `pd~ AR↯GO flux` — metro→osc~→fold~→bp~ で対角線とバーストを叩き込む ARGOPd 系
+  - `pd~ Ofelia bloom` — noise~→samp-hold→env~ を反応拡散に流し込む Ofelia 系
+  - `pd~ EYESY scanlines` — phasor~ スイープと metro バーストでストライプを描く EYESY 系
+- **パッチグラフビュー**: 選択したパッチのノードと入力を UI に表示、Pd っぽい流れを確認できます。
+- **マイク連動**: 低域エネルギーで衝撃＆色シフトを増幅。
+- **ルックコントロール**: パレット、グリッド密度、チルト、グロー、グレイン。
+- **ビルド不要**: HTML を開くだけ。静的サーバーに置けば即 VJ 用。
 
 ## 使い方
-- ファイルをダブルクリック or 任意の静的ホスティングにアップロード（GitHub Pages/Netlify/Cloudflare/Vercel 等）
-- ショートカット: Space=Play/Pause, **F**=Fullscreen, **V**=VJ Mode
+1. ローカルで配信（マイク権限のため `file://` ではなく http 推奨）
+   ```bash
+   python -m http.server 4173
+   # → http://localhost:4173 をブラウザで開く
+   ```
+2. Play/Pause で再生切替、Patch Rack からパッチ（AR↯GO flux / Ofelia bloom / EYESY scanlines）を選択。
+3. 「Enable Mic」でブラウザのマイク許可。VU メーターとグリッドがビートに同期します。
+4. Canvas をドラッグして手動で衝撃を描き込み、ルック系スライダーで色味を調整。
 
-## GitHub への保存（最短）
-1. 新規リポジトリを作成（例: `matrix-vibration`）
-2. このフォルダの中身をアップロード（`index.html`, `LICENSE`, `README.md`）
-3. GitHub Pages で公開するなら:
-   - Repository → Settings → Pages → “**Deploy from a branch**”、Branch を `main / root` に
-   - 数十秒後に公開URLが出ます
+## ショートカット
+- Space: Pause/Play
+- ウィンドウリサイズ: キャンバスを再フレーム
 
-## CLI で一気に
-```bash
-# unzip 後のディレクトリへ
-git init -b main
-git add .
-git commit -m "Initial commit: Matrix Vibration Lab (single-file)"
-# GitHub CLI がある場合
-gh repo create <your-username>/matrix-vibration --public --source=. --remote=origin --push
-# Pages は Settings から有効化（UI）。または Vercel/Netlify にそのままドラッグ&ドロップ。
-```
+## ビルド＆依存
+- 追加ビルドなし。React/Tailwind/Babel は CDN から読み込み。
+- コードは `index.html` 一枚に収まっています。
 
 ## ライセンス
-MIT License（同梱の `LICENSE` を参照）
+MIT License（`LICENSE` を参照）

@@ -3,438 +3,555 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Matrix Grid Vibration Lab</title>
-  <meta name="description" content="Neon grid 2D vibration simulator with sequencer + VJ mode" />
-  <style>html,body,#root{height:100%;background:#000;margin:0}</style>
-  <!-- Tailwind via CDN -->
+  <title>PRISMatrix / pd~ reactive grid mutations</title>
+  <meta name="description" content="Pure Data-inspired, audio-sculpted neon membrane riffs with ARGOPd, Ofelia, and EYESY DNA." />
+  <style>html,body,#root{height:100%;margin:0;background:#030312;color:#e0fffa;font-family:Inter,system-ui,sans-serif}</style>
   <script src="https://cdn.tailwindcss.com"></script>
-  <!-- React 18 UMD -->
   <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  <!-- Babel for JSX (no-build) -->
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 </head>
 <body class="bg-black">
   <div id="root"></div>
-
-  <!-- JSX app. IMPORTANT: data-presets enables JSX/ES transform in-browser -->
   <script type="text/babel" data-presets="react,env">
-    const {useEffect,useRef,useState} = React;
+    const { useEffect, useRef, useState } = React;
 
-    const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
-    function useRaf(callback, running) {
-      const cb = useRef(callback);
-      const run = useRef(running);
-      useEffect(() => { cb.current = callback; }, [callback]);
-      useEffect(() => { run.current = running; }, [running]);
-      useEffect(() => {
-        let id;
-        const loop = () => { if (run.current) cb.current?.(); id = requestAnimationFrame(loop); };
-        id = requestAnimationFrame(loop);
-        return () => cancelAnimationFrame(id);
-      }, []);
-    }
+    const clamp = (x,a,b)=>Math.min(Math.max(x,a),b);
+    const lerp = (a,b,t)=>a+(b-a)*t;
+    const TAU = Math.PI*2;
+    const hslToRgb = (h,s,l)=>{
+      const a=s*Math.min(l,1-l);
+      const f=n=>{const k=(n+h*6)%6;return l-a*Math.max(Math.min(k,4-k,1),-1)};
+      return [f(0),f(2/3),f(1/3)].map(v=>Math.round(v*255));
+    };
 
-    function MatrixVibrationLab() {
-      // --- params ---
-      const [engine, setEngine] = useState('membrane');
-      const [N, setN] = useState(160);
-      const [c, setC] = useState(0.35);
-      const [k, setK] = useState(0.010);
-      const [gamma, setGamma] = useState(0.010);
-      const [boundary, setBoundary] = useState('fixed');
-      const [stepsPerFrame, setStepsPerFrame] = useState(1);
-      const [ampScale, setAmpScale] = useState(1.2);
-      const [running, setRunning] = useState(true);
-      const [showFPS, setShowFPS] = useState(true);
+    const useRaf = (fn, active=true)=>{
+      const ref=useRef(fn); const running=useRef(active);
+      useEffect(()=>{ref.current=fn;},[fn]);
+      useEffect(()=>{running.current=active;},[active]);
+      useEffect(()=>{
+        let id; const loop=()=>{ if(running.current) ref.current?.(); id=requestAnimationFrame(loop); };
+        id=requestAnimationFrame(loop); return()=>cancelAnimationFrame(id);
+      },[]);
+    };
 
-      // brush
-      const [brushRadius, setBrushRadius] = useState(6);
-      const [brushPower, setBrushPower] = useState(1.0);
+    const createField = (n)=>({ u:new Float32Array(n*n), v:new Float32Array(n*n) });
+    const idx=(n,x,y)=>y*n+x;
 
-      // visual
-      const [gridOn, setGridOn] = useState(true);
-      const [gridOpacity, setGridOpacity] = useState(0.18);
-      const [gridGlow, setGridGlow] = useState(6);
+    const laplace = (n, src, out, mode='wrap')=>{
+      const wrap=(x, max)=>{if(x<0) return max-1; if(x>=max) return 0; return x;};
+      for(let y=0;y<n;y++){
+        for(let x=0;x<n;x++){
+          const i=idx(n,x,y);
+          const xm = mode==='wrap'?wrap(x-1,n):clamp(x-1,0,n-1);
+          const xp = mode==='wrap'?wrap(x+1,n):clamp(x+1,0,n-1);
+          const ym = mode==='wrap'?wrap(y-1,n):clamp(y-1,0,n-1);
+          const yp = mode==='wrap'?wrap(y+1,n):clamp(y+1,0,n-1);
+          const u=src[i];
+          out[i] = src[idx(n,xm,y)] + src[idx(n,xp,y)] + src[idx(n,x,ym)] + src[idx(n,x,yp)] - 4*u;
+        }
+      }
+    };
 
-      // sequencer
-      const [seqOn, setSeqOn] = useState(false);
-      const [seqMode, setSeqMode] = useState('random');
-      const [seqInterval, setSeqInterval] = useState(0.25);
-      const [seqRadius, setSeqRadius] = useState(6);
-      const [seqPower, setSeqPower] = useState(1.2);
-      const [seqCols, setSeqCols] = useState(8);
-      const [seqRows, setSeqRows] = useState(8);
-      const [seqJitter, setSeqJitter] = useState(0.2);
-      const [seqZigzag, setSeqZigzag] = useState(true);
-      const gridStepRef = useRef(0);
+    const makePdOps = (state, t, dt, audioE)=>({
+      metro:(id,hz)=>{
+        const key=`${id}:acc`;
+        state[key]=(state[key]||0)+dt;
+        const p=Math.max(0.001,1/Math.max(0.001,hz));
+        if(state[key]>=p){ state[key]-=p; return 1; }
+        return 0;
+      },
+      osc:(id,freq)=>{
+        const key=`${id}:phase`;
+        state[key]=(state[key]||0)+freq*dt;
+        state[key]%=1;
+        return Math.sin(TAU*state[key]);
+      },
+      phasor:(id,freq)=>{
+        const key=`${id}:phase`;
+        state[key]=(state[key]||0)+freq*dt;
+        state[key]%=1;
+        return state[key];
+      },
+      lag:(id,val,coef=0.82)=>{
+        const key=`${id}:lag`;
+        state[key]=(state[key]??val);
+        state[key]=lerp(state[key],val,1-coef);
+        return state[key];
+      },
+      noise:()=>Math.random()*2-1,
+      sh:(id,src,gate=0.5)=>{
+        const key=`${id}:hold`;
+        const open=Math.random()<clamp(gate,0,1);
+        if(open) state[key]=src;
+        return state[key]??src;
+      },
+      env:(id,gate,attack=0.04,decay=0.25)=>{
+        const key=`${id}:env`;
+        state[key]=(state[key]||0)+((gate?1:0)-(state[key]||0))* (gate? (1-attack): (1-decay));
+        return state[key];
+      },
+    });
 
-      // VJ/fullscreen
-      const [vjMode, setVjMode] = useState(false);
-      const [isFs, setIsFs] = useState(false);
+    const runPdGraph = (graph, pd, t, dt, audioE, state)=>{
+      const memo={};
+      state.__graphMap = state.__graphMap || Object.fromEntries(graph.map(n=>[n.id,n]));
+      const nodes=state.__graphMap;
+      const evalNode=(id)=>{
+        if(memo[id]!==undefined) return memo[id];
+        const node=nodes[id]; if(!node) return 0;
+        const ins=(node.inputs||[]).map(evalNode);
+        let out=0;
+        switch(node.type){
+          case 'audio': out=audioE; break;
+          case 'const': out=node.value??0; break;
+          case 'metro': out=pd.metro(id, node.hz||1); break;
+          case 'osc~': {
+            const freq=Math.abs((node.hz||1)+ (node.fm||0)*(ins[0]||0) + (node.audioMod||0)*audioE);
+            const amp=(node.amp??1)* (node.inputs?.length? ins[ins.length-1]||1:1);
+            out=pd.osc(id,freq)*amp; break;
+          }
+          case 'phasor~': {
+            const freq=Math.abs((node.hz||1)+(node.fm||0)*(ins[0]||0)+(node.audioMod||0)*audioE);
+            out=pd.phasor(id, freq); break;
+          }
+          case 'env~': {
+            const gate=ins[0]!==undefined?ins[0]:audioE>0.02;
+            out=pd.env(id, gate> (node.thresh??0.4), node.attack??0.03, node.decay??0.2); break;
+          }
+          case 'lag~': out=pd.lag(id, ins[0]||0, node.coef??0.85); break;
+          case 'noise~': out=pd.noise(); break;
+          case 'sh~': out=pd.sh(id, ins[0]||0, ins[1]!==undefined?ins[1]:node.gate??0.4); break;
+          case 'mul': out=ins.reduce((a,b)=>a*b, node.gain??1); break;
+          case 'add': out=ins.reduce((a,b)=>a+b, node.bias??0); break;
+          case 'mix': out=ins.length?ins.reduce((a,b)=>a+b,0)/ins.length:0; break;
+          case 'fold~': out=Math.tanh((ins[0]||0)*(node.drive??1)); break;
+          case 'bp~': {
+            const freq=Math.abs(node.hz||2);
+            const key=`${id}:bp`;
+            const prev=state[key]||0; const alpha=clamp(freq*dt,0,1);
+            const input=ins[0]||0;
+            const y = prev + alpha*(input - prev) + (node.resonance??0.2)*(prev-(state[`${id}:prevIn`]||0));
+            state[`${id}:prevIn`]=input; state[key]=y; out=y*(node.amp??1);
+            break;
+          }
+          default: out=0;
+        }
+        memo[id]=out; return out;
+      };
+      graph.forEach(n=>evalNode(n.id));
+      return memo;
+    };
 
-      // canvas/buffers
-      const canvasRef = useRef(null);
-      const containerRef = useRef(null);
-      const gridRef = useRef(null);
-      const dpiRef = useRef(window.devicePixelRatio || 1);
-      const buffers = useRef({ uPrev:null,uCurr:null,uNext:null,lap1:null,lap2:null });
-      const fps = useRef({ last: performance.now(), frames:0, fps:0 });
+    const patchLibrary = {
+      pd_argo_flux: {
+        name: 'pd~ AR↯GO flux',
+        hint: 'metro → osc~ → fold~ → bp~ sending diagonals and bass shocks (ARGOPd pulse)',
+        graph: [
+          {id:'aud', type:'audio'},
+          {id:'metroA', type:'metro', hz:1.3},
+          {id:'metroB', type:'metro', hz:0.65},
+          {id:'bass', type:'osc~', hz:0.18, fm:0.15, inputs:['aud']},
+          {id:'warp', type:'phasor~', hz:0.08, audioMod:0.24},
+          {id:'burst', type:'sh~', gate:0.5, inputs:['aud','metroB']},
+          {id:'drive', type:'fold~', drive:2.4, inputs:['bass']},
+          {id:'sweep', type:'add', inputs:['warp','drive'], bias:0},
+          {id:'mainEnv', type:'env~', inputs:['metroA'], attack:0.06, decay:0.35},
+          {id:'color', type:'lag~', coef:0.9, inputs:['sweep']},
+          {id:'bp', type:'bp~', hz:3.6, resonance:0.35, inputs:['burst']},
+        ],
+        step: ({n, field, lap, audioE, t, dt, state})=>{
+          const {u,v}=field; const len=n*n; const pd=makePdOps(state, t, dt, audioE);
+          const values=runPdGraph(patchLibrary.pd_argo_flux.graph, pd, t, dt, audioE, state);
+          const diagTilt = values.warp*0.6 + values.drive*0.2;
+          for(let i=0;i<len;i++){
+            const acc = 0.22*lap[i] - 0.01*u[i];
+            const diag = ((i%n)+(Math.floor(i/n)))/n;
+            const wobble = Math.sin((diag+diagTilt)*TAU + t*1.8)*0.08;
+            v[i]=(v[i]+acc+wobble)*(0.986 - 0.06*audioE);
+            u[i]+=v[i];
+          }
+          if(values.metroA){
+            const cx=Math.random()*n; const cy=Math.random()*n; const r=Math.floor(lerp(8,28, clamp(audioE*1.6,0,1))); const r2=r*r;
+            for(let y=Math.max(0,cy-r);y<Math.min(n,cy+r);y++) for(let x=Math.max(0,cx-r);x<Math.min(n,cx+r);x++){
+              const d2=(x-cx)*(x-cx)+(y-cy)*(y-cy); if(d2<=r2){
+                u[idx(n,x,y)] += (1+audioE*2.2)*Math.exp(-d2/(0.32*r2+1e-3));
+              }
+            }
+          }
+          if(values.metroB){
+            const lane=Math.floor(values.warp*n);
+            for(let x=0;x<n;x++){ u[idx(n,x,lane)] += (0.6+audioE*1.4)*(0.6+values.drive*0.8); }
+          }
+          if(Math.random()<0.2+audioE*0.5){
+            const y=Math.floor(lerp(0,n,values.sweep%1));
+            for(let x=0;x<n;x++){ u[idx(n,x,y)] += (0.4+values.mainEnv*1.2)*(values.bp*0.6+0.4); }
+          }
+          state.__colorMod = values.color;
+        }
+      },
+      pd_ofelia_bloom: {
+        name: 'pd~ Ofelia bloom',
+        hint: 'noise~ → samp-hold → env~ into cellular reaction bloom (Ofelia shader nods)',
+        graph: [
+          {id:'aud', type:'audio'},
+          {id:'metro', type:'metro', hz:2.1},
+          {id:'noise', type:'noise~'},
+          {id:'hold', type:'sh~', gate:0.42, inputs:['noise','aud']},
+          {id:'env', type:'env~', attack:0.08, decay:0.42, inputs:['metro']},
+          {id:'drift', type:'lag~', coef:0.93, inputs:['hold']},
+          {id:'grain', type:'bp~', hz:5.5, resonance:0.2, inputs:['drift']},
+          {id:'osc', type:'osc~', hz:0.11, fm:0.14, inputs:['aud']},
+          {id:'spray', type:'mix', inputs:['grain','osc','env']},
+        ],
+        step: ({n, field, lap, audioE, t, dt, state})=>{
+          const {u,v}=field; const len=n*n; const pd=makePdOps(state, t, dt, audioE);
+          const values=runPdGraph(patchLibrary.pd_ofelia_bloom.graph, pd, t, dt, audioE, state);
+          for(let i=0;i<len;i++){
+            const reaction = u[i]*(1-u[i]) - v[i];
+            const sinus = Math.sin(t*0.7 + i*0.002 + values.drift*0.9);
+            const diff = 0.2*lap[i] + 0.05*sinus;
+            v[i] = clamp(v[i] + diff*0.6 + values.env*0.35*values.noise, -2,2);
+            u[i] = clamp(u[i] + (reaction+v[i])*0.28 + values.grain*0.08, -1.6,1.6);
+          }
+          const cells=6; const cellSize=Math.floor(n/cells);
+          for(let gy=0;gy<cells;gy++) for(let gx=0;gx<cells;gx++){
+            if((gx+gy+t*0.2)%2<1.2){
+              const cx=(gx+0.3+Math.random()*0.5)*cellSize; const cy=(gy+0.3+Math.random()*0.5)*cellSize;
+              const r=Math.floor(lerp(4,14, clamp(values.env+audioE*0.8,0,1))); const r2=r*r;
+              for(let y=Math.max(0,cy-r);y<Math.min(n,cy+r);y++) for(let x=Math.max(0,cx-r);x<Math.min(n,cx+r);x++){
+                const d2=(x-cx)*(x-cx)+(y-cy)*(y-cy); if(d2<=r2){
+                  u[idx(n,x,y)] += (0.4+values.spray*0.8)*(0.6+audioE*0.6)*Math.exp(-d2/(0.35*r2+1e-3));
+                }
+              }
+            }
+          }
+          state.__colorMod = values.spray;
+        }
+      },
+      pd_eyesy_scanlines: {
+        name: 'pd~ EYESY scanlines',
+        hint: 'phasor~ sweeps + metro bursts + tilt lag (EYESY-style vector stripes)',
+        graph: [
+          {id:'aud', type:'audio'},
+          {id:'sweep', type:'phasor~', hz:0.14, audioMod:0.5},
+          {id:'tilt', type:'lag~', coef:0.9, inputs:['sweep']},
+          {id:'burst', type:'metro', hz:3.6},
+          {id:'env', type:'env~', attack:0.04, decay:0.28, inputs:['burst']},
+          {id:'noise', type:'noise~'},
+          {id:'grain', type:'bp~', hz:4.4, resonance:0.3, inputs:['noise']},
+          {id:'mix', type:'mix', inputs:['grain','env','aud']},
+        ],
+        step: ({n, field, lap, audioE, t, dt, state})=>{
+          const {u,v}=field; const len=n*n; const pd=makePdOps(state, t, dt, audioE);
+          const values=runPdGraph(patchLibrary.pd_eyesy_scanlines.graph, pd, t, dt, audioE, state);
+          const drive = 0.12 + audioE*0.6;
+          for(let i=0;i<len;i++){
+            const x=i%n;
+            const line = Math.sin((x/n)*TAU*0.4 + t*1.9 + values.tilt*1.6);
+            const accel = 0.08*lap[i] + line*drive + values.mix*0.12;
+            v[i] = v[i]*0.95 + accel;
+            u[i] = u[i]*0.94 + v[i];
+          }
+          const scanY = Math.floor(values.sweep*n);
+          const height = Math.max(2, Math.floor(lerp(4, n/5, audioE+values.env*0.8)));
+          for(let y=scanY; y<Math.min(n, scanY+height); y++) for(let x=0;x<n;x++){
+            u[idx(n,x,y)] += drive*0.85 + values.env*0.4;
+          }
+          if(values.burst){
+            const cx=Math.random()*n; const cy=Math.random()*n; const r=Math.floor(lerp(5,16, audioE+values.env*0.5)); const r2=r*r;
+            for(let y=Math.max(0,cy-r); y<Math.min(n,cy+r); y++) for(let x=Math.max(0,cx-r); x<Math.min(n,cx+r); x++){
+              const d2=(x-cx)*(x-cx)+(y-cy)*(y-cy); if(d2<=r2){ u[idx(n,x,y)] += (1+audioE*2)*Math.exp(-d2/(0.3*r2+1e-3)); }
+            }
+          }
+          state.__colorMod = values.mix;
+        }
+      },
+    };
 
-      // listeners
-      useEffect(() => {
-        const onResize = () => { dpiRef.current = window.devicePixelRatio || 1; sizeCanvas(); drawGridOverlay(); };
-        const onFs = () => { setIsFs(!!document.fullscreenElement); sizeCanvas(); drawGridOverlay(); };
+    const palettes = {
+      liminal: { name:'Liminal Neon', fn:(h)=>[h, 0.85, 0.55] },
+      tropic: { name:'Tropic Acid', fn:(h)=>[(h+0.12)%1, 0.95, 0.5] },
+      noir: { name:'Noir Plasma', fn:(h)=>[(h+0.6)%1, 0.8, 0.42] },
+    };
+
+    function PrismatrixApp(){
+      const [n,setN]=useState(192);
+      const [mode,setMode]=useState('pd_argo_flux');
+      const [palette,setPalette]=useState('liminal');
+      const [gridGlow,setGridGlow]=useState(0.14);
+      const [tilt,setTilt]=useState(8);
+      const [running,setRunning]=useState(true);
+      const [micOn,setMicOn]=useState(false);
+      const [status,setStatus]=useState('idle');
+      const [fps,setFps]=useState(0);
+      const [grain,setGrain]=useState(0.18);
+      const canvasRef=useRef(null);
+      const overlayRef=useRef(null);
+      const fieldRef=useRef(createField(n));
+      const lapRef=useRef(new Float32Array(n*n));
+      const patchStateRef=useRef({});
+      const audioRef=useRef({ctx:null, analyser:null, data:null, stream:null});
+      const energyRef=useRef(0);
+      const lastTick=useRef(performance.now());
+      const tRef=useRef(0);
+
+      useEffect(()=>{
+        fieldRef.current=createField(n);
+        lapRef.current=new Float32Array(n*n);
+        resizeCanvas();
+        drawGrid();
+      },[n]);
+
+      const resizeCanvas=()=>{
+        const c=canvasRef.current, o=overlayRef.current; if(!c||!o) return;
+        const parent=c.parentElement; const size=Math.min(parent.clientWidth, parent.clientHeight);
+        const dpr=window.devicePixelRatio||1; const px=Math.max(420, size);
+        c.style.width=o.style.width=px+'px'; c.style.height=o.style.height=px+'px';
+        c.width=o.width=Math.round(px*dpr); c.height=o.height=Math.round(px*dpr);
+        c.getContext('2d').imageSmoothingEnabled=false;
+      };
+
+      useEffect(()=>{
+        const onResize=()=>{resizeCanvas(); drawGrid();};
         window.addEventListener('resize', onResize);
-        document.addEventListener('fullscreenchange', onFs);
-        return () => { window.removeEventListener('resize', onResize); document.removeEventListener('fullscreenchange', onFs); };
-      }, []);
+        resizeCanvas(); drawGrid();
+        return()=>window.removeEventListener('resize', onResize);
+      },[]);
 
-      // allocate buffers
-      useEffect(() => {
-        const len = N*N;
-        buffers.current.uPrev = new Float32Array(len);
-        buffers.current.uCurr = new Float32Array(len);
-        buffers.current.uNext = new Float32Array(len);
-        buffers.current.lap1 = new Float32Array(len);
-        buffers.current.lap2 = new Float32Array(len);
-        buffers.current.uPrev.fill(0);
-        buffers.current.uCurr.fill(0);
-        buffers.current.uNext.fill(0);
-        sizeCanvas();
-        drawGridOverlay();
-      }, [N, engine]);
-
-      // math helpers
-      const idx = (x,y)=> y*N + x;
-      const sample = (arr, x, y) => {
-        if (boundary === 'periodic') { const xx=(x+N)%N, yy=(y+N)%N; return arr[idx(xx,yy)]; }
-        else if (boundary === 'reflective') { const xx=x<0?0:x>=N?N-1:x, yy=y<0?0:y>=N?N-1:y; return arr[idx(xx,yy)]; }
-        else { if (x<0||y<0||x>=N||y>=N) return 0; return arr[idx(x,y)]; }
-      };
-      const lap = (src, out) => {
-        for (let y=0;y<N;y++) for (let x=0;x<N;x++) {
-          const u=src[idx(x,y)], l=sample(src,x-1,y), r=sample(src,x+1,y), u1=sample(src,x,y-1), d1=sample(src,x,y+1);
-          out[idx(x,y)] = l + r + u1 + d1 - 4*u;
+      const drawGrid=()=>{
+        const o=overlayRef.current; if(!o) return;
+        const g=o.getContext('2d'); const {width:W,height:H}=o; g.clearRect(0,0,W,H);
+        g.strokeStyle=`rgba(0,255,200,${gridGlow})`; g.lineWidth=1; g.shadowColor='rgba(0,255,200,0.6)'; g.shadowBlur=14*gridGlow;
+        const stepX=W/n, stepY=H/n; const step=Math.max(1, Math.floor(Math.min(stepX, stepY)));
+        for(let x=0;x<=n;x+=Math.max(1,Math.floor(n/24))){
+          const px=Math.round(x*stepX)+0.5; g.beginPath(); g.moveTo(px,0); g.lineTo(px,H); g.stroke();
         }
-      };
-      const stepMembrane = (r,g) => {
-        const {uPrev,uCurr,uNext,lap1}=buffers.current; lap(uCurr,lap1); const L=N*N;
-        for (let i=0;i<L;i++){ const u=uCurr[i], up=uPrev[i]; uNext[i]=clamp(2*u - up + r*lap1[i] - g*(u-up), -100, 100); }
-        buffers.current.uPrev=uCurr; buffers.current.uCurr=uNext; buffers.current.uNext=uPrev;
-      };
-      const stepPlate = (kk,g) => {
-        const {uPrev,uCurr,uNext,lap1,lap2}=buffers.current; lap(uCurr,lap1); lap(lap1,lap2); const L=N*N;
-        for (let i=0;i<L;i++){ const u=uCurr[i], up=uPrev[i]; uNext[i]=clamp(2*u - up + kk*lap2[i] - g*(u-up), -100, 100); }
-        buffers.current.uPrev=uCurr; buffers.current.uCurr=uNext; buffers.current.uNext=uPrev;
-      };
-      const paintImpulse = (cx,cy,r,p) => {
-        const {uCurr}=buffers.current; const r2=r*r;
-        const minX=Math.max(0,Math.floor(cx-r)), maxX=Math.min(N-1,Math.ceil(cx+r));
-        const minY=Math.max(0,Math.floor(cy-r)), maxY=Math.min(N-1,Math.ceil(cy+r));
-        for (let y=minY;y<=maxY;y++) for (let x=minX;x<=maxX;x++){
-          const dx=x-cx, dy=y-cy, d2=dx*dx+dy*dy; if (d2<=r2){ const w=Math.exp(-d2/(0.5*r2+1e-6)); uCurr[idx(x,y)]+=p*w; }
+        for(let y=0;y<=n;y+=Math.max(1,Math.floor(n/24))){
+          const py=Math.round(y*stepY)+0.5; g.beginPath(); g.moveTo(0,py); g.lineTo(W,py); g.stroke();
         }
       };
 
-      // sequencer tick
-      const triggerSequencer = () => {
-        if (seqMode==='random') {
-          const x=Math.floor(Math.random()*N), y=Math.floor(Math.random()*N);
-          paintImpulse(x,y,seqRadius,seqPower);
-        } else {
-          const total=Math.max(1, seqCols*seqRows);
-          let i=gridStepRef.current%total; gridStepRef.current=(gridStepRef.current+1)%total;
-          let gx=i%seqCols, gy=Math.floor(i/seqCols);
-          if (seqZigzag && gy%2===1) gx=seqCols-1-gx;
-          const cellW=N/seqCols, cellH=N/seqRows, cellMin=Math.min(cellW,cellH);
-          const jAmp=seqJitter*0.5*cellMin;
-          let cx=(gx+0.5)*cellW + (Math.random()*2-1)*jAmp;
-          let cy=(gy+0.5)*cellH + (Math.random()*2-1)*jAmp;
-          const x=clamp(Math.round(cx),0,N-1), y=clamp(Math.round(cy),0,N-1);
-          paintImpulse(x,y,seqRadius,seqPower);
-        }
-      };
-      useEffect(() => {
-        if (!seqOn) return;
-        const ms = Math.max(20, Math.floor(seqInterval*1000));
-        const id = setInterval(()=>{ if (running) triggerSequencer(); }, ms);
-        return () => clearInterval(id);
-      }, [seqOn, seqInterval, seqMode, seqRadius, seqPower, seqCols, seqRows, seqJitter, seqZigzag, N, running]);
+      useEffect(()=>{drawGrid();},[gridGlow,n]);
 
-      // canvas sizing & grid
-      const sizeCanvas = () => {
-        const canvas=canvasRef.current, parent=containerRef.current; if(!canvas||!parent) return;
-        const rect = parent.getBoundingClientRect();
-        const size = Math.min(rect.width, 760), dpr=dpiRef.current;
-        canvas.style.width = size+'px'; canvas.style.height=size+'px';
-        canvas.width=Math.round(size*dpr); canvas.height=Math.round(size*dpr);
-        canvas.style.imageRendering='pixelated';
-      };
-      const drawGridOverlay = () => {
-        const canvas=canvasRef.current; if (!canvas) return;
-        const W=canvas.width, H=canvas.height;
-        const grid=document.createElement('canvas'); grid.width=W; grid.height=H;
-        const g=grid.getContext('2d'); g.clearRect(0,0,W,H);
-        const stepX=W/N, stepY=H/N;
-        g.strokeStyle = `rgba(0,255,140,${gridOpacity})`;
-        g.lineWidth = Math.max(1, Math.floor(Math.min(stepX, stepY) * 0.02));
-        g.shadowColor='rgba(0,255,140,0.7)'; g.shadowBlur=gridGlow;
-        for (let i=0;i<=N;i++){ const x=Math.round(i*stepX)+0.5; g.beginPath(); g.moveTo(x,0); g.lineTo(x,H); g.stroke(); }
-        for (let j=0;j<=N;j++){ const y=Math.round(j*stepY)+0.5; g.beginPath(); g.moveTo(0,y); g.lineTo(W,y); g.stroke(); }
-        gridRef.current=grid;
-      };
-
-      // pointer input
-      useEffect(() => {
-        const canvas=canvasRef.current; if (!canvas) return; let drawing=false;
-        const toCell = (e) => {
-          const rect = canvas.getBoundingClientRect();
-          const x = Math.floor(((e.clientX-rect.left)/rect.width)*N);
-          const y = Math.floor(((e.clientY-rect.top)/rect.height)*N);
-          return {x,y};
+      useEffect(()=>{
+        const clean=()=>{
+          const {stream,ctx}=audioRef.current; if(stream) stream.getTracks().forEach(t=>t.stop()); if(ctx) ctx.close();
+          audioRef.current={ctx:null, analyser:null, data:null, stream:null}; energyRef.current=0; setStatus('idle');
         };
-        const down=(e)=>{ drawing=true; const {x,y}=toCell(e); paintImpulse(x,y,brushRadius,brushPower); };
-        const move=(e)=>{ if(!drawing) return; const {x,y}=toCell(e); paintImpulse(x,y,brushRadius,brushPower*0.5); };
-        const up=()=>{ drawing=false; };
-        canvas.addEventListener('pointerdown',down);
-        window.addEventListener('pointermove',move);
-        window.addEventListener('pointerup',up);
-        return ()=>{ canvas.removeEventListener('pointerdown',down); window.removeEventListener('pointermove',move); window.removeEventListener('pointerup',up); };
-      }, [N, brushRadius, brushPower]);
+        if(!micOn){ clean(); return; }
+        setStatus('request mic'); let cancelled=false;
+        (async()=>{
+          try{
+            const stream=await navigator.mediaDevices.getUserMedia({audio:true}); if(cancelled) return;
+            const ctx=new AudioContext(); const src=ctx.createMediaStreamSource(stream); const analyser=ctx.createAnalyser();
+            analyser.fftSize=1024; analyser.smoothingTimeConstant=0.7; src.connect(analyser);
+            audioRef.current={ctx, analyser, data:new Uint8Array(analyser.frequencyBinCount), stream}; setStatus('listening');
+          }catch(e){console.warn(e); setStatus('denied'); setMicOn(false);}
+        })();
+        return()=>{cancelled=true; clean();};
+      },[micOn]);
 
-      // shortcuts
-      useEffect(() => {
-        const onKey=(e)=>{
-          if (e.key===' ') { e.preventDefault(); setRunning(v=>!v); }
-          if (e.key.toLowerCase()==='f') { toggleFullscreen(); }
-          if (e.key.toLowerCase()==='v') { setVjMode(v=>!v); setTimeout(()=>{ sizeCanvas(); drawGridOverlay(); },0); }
-        };
-        window.addEventListener('keydown', onKey);
-        return ()=> window.removeEventListener('keydown', onKey);
-      }, []);
+      useRaf(()=>{
+        const now=performance.now(); const dt=(now-lastTick.current)/1000; lastTick.current=now; tRef.current+=dt;
+        const {ctx,analyser,data}=audioRef.current;
+        if(ctx&&analyser&&data){ analyser.getByteFrequencyData(data); let sum=0,bass=0; const bassBins=18;
+          for(let i=0;i<data.length;i++){ sum+=data[i]; if(i<bassBins) bass+=data[i]; }
+          const norm=sum/(data.length*255); const bassNorm=bass/(bassBins*255);
+          energyRef.current = lerp(energyRef.current, Math.pow(norm,0.8)+bassNorm*0.4, 0.15);
+        } else { energyRef.current*=0.93; }
 
-      // render loop
-      useRaf(() => {
-        for (let s=0;s<stepsPerFrame;s++){
-          if (engine==='membrane') stepMembrane(clamp(c*c,0,0.5), gamma);
-          else stepPlate(clamp(k,0,0.02), gamma);
-        }
-        const canvas=canvasRef.current; if(!canvas) return;
-        const ctx=canvas.getContext('2d'); const W=canvas.width,H=canvas.height;
-        ctx.fillStyle='#000'; ctx.fillRect(0,0,W,H);
-        const {uCurr}=buffers.current; const img=ctx.createImageData(W,H);
-        for (let py=0;py<H;py++){
-          const gy=Math.floor((py/H)*N);
-          for (let px=0;px<W;px++){
-            const gx=Math.floor((px/W)*N); const v=uCurr[idx(gx,gy)];
-            const intensity=clamp(Math.abs(v)/ampScale,0,1);
-            const sgn=v>=0?1.0:0.7;
-            const gval=Math.pow(intensity,0.55)*255;
-            const r=gval*0.08*sgn, b=gval*0.18*(1-0.3*sgn);
-            const o=(py*W+px)*4; img.data[o]=r|0; img.data[o+1]=gval|0; img.data[o+2]=b|0; img.data[o+3]=255;
+        const nCurr=n; const {u,v}=fieldRef.current; const lap=lapRef.current;
+        laplace(nCurr,u,lap,'wrap');
+        const patch=patchLibrary[mode];
+        const patchState = patchStateRef.current[mode] || (patchStateRef.current[mode]={});
+        patch.step({n:nCurr, field:fieldRef.current, lap, audioE:clamp(energyRef.current,0,1), t:tRef.current, dt, state:patchState});
+
+        const c=canvasRef.current; if(!c) return; const ctx2=c.getContext('2d'); const W=c.width, H=c.height; const img=ctx2.createImageData(W,H);
+        const paletteFn=palettes[palette].fn; const tiltR=tilt/180*Math.PI;
+        const sin=Math.sin(tiltR), cos=Math.cos(tiltR);
+        const energy=clamp(energyRef.current,0,1);
+        const colorMod = (patchStateRef.current[mode]?.__colorMod)||0;
+        const scaleFactor=1+energy*0.35;
+        for(let y=0;y<H;y++){
+          for(let x=0;x<W;x++){
+            const nx=(x/W-0.5), ny=(y/H-0.5);
+            const rx = (nx*cos - ny*sin)*scaleFactor + 0.5;
+            const ry = (nx*sin + ny*cos)*scaleFactor + 0.5;
+            const gx=clamp(Math.floor(rx*nCurr),0,nCurr-1);
+            const gy=clamp(Math.floor(ry*nCurr),0,nCurr-1);
+            const val=u[idx(nCurr,gx,gy)];
+            const mag=clamp(Math.abs(val)*0.6 + energy*0.3 + Math.abs(colorMod)*0.15,0,1.5);
+            const hue=(0.62 + 0.3*Math.sin(tRef.current*0.4 + nx*4 + ny*2) + 0.25*val + energy*0.2 + colorMod*0.2)%1;
+            const [r,g,b]=hslToRgb(...paletteFn((hue+1)%1));
+            const grainJitter=(Math.random()-0.5)*grain*255;
+            const i=(y*W+x)*4; img.data[i]=clamp(r+mag*80+grainJitter,0,255);
+            img.data[i+1]=clamp(g+mag*120+grainJitter,0,255); img.data[i+2]=clamp(b+mag*160+grainJitter,0,255); img.data[i+3]=255;
           }
         }
-        ctx.putImageData(img,0,0);
-        if (gridOn && gridRef.current) {
-          ctx.globalCompositeOperation='screen';
-          ctx.drawImage(gridRef.current,0,0);
-          ctx.globalCompositeOperation='source-over';
-        }
-        const now=performance.now(); fps.current.frames++;
-        if (now-fps.current.last>=500){ fps.current.fps=(fps.current.frames*1000)/(now-fps.current.last); fps.current.frames=0; fps.current.last=now; }
+        ctx2.putImageData(img,0,0);
+
+        if(Math.random()<0.08){ setFps(1/dt); }
       }, running);
 
-      // actions
-      const reset = ()=>{ buffers.current.uPrev.fill(0); buffers.current.uCurr.fill(0); buffers.current.uNext.fill(0); };
-      const randomize = ()=>{ const L=N*N; for (let i=0;i<L;i++) buffers.current.uCurr[i]=(Math.random()-0.5)*0.4; buffers.current.uPrev.set(buffers.current.uCurr); };
-      const presetDrop = ()=>{ paintImpulse(Math.floor(N/2),Math.floor(N/2),Math.floor(N*0.08),2.0); };
-      const presetTwoSources = ()=>{ paintImpulse(Math.floor(N*0.33),Math.floor(N/2),Math.floor(N*0.05),1.5); paintImpulse(Math.floor(N*0.66),Math.floor(N/2),Math.floor(N*0.05),1.5); };
-      const presetPlaneWave = ()=>{ const {uCurr,uPrev}=buffers.current; const amp=1.0; for(let y=0;y<N;y++) for(let x=0;x<N;x++){ const phase=(x/N)*Math.PI*4; uCurr[idx(x,y)]=amp*Math.sin(phase);} uPrev.set(uCurr); };
-      const exportPNG = ()=>{ const c=canvasRef.current; const a=document.createElement('a'); a.download=`matrix_vibration_${engine}_${Date.now()}.png`; a.href=c.toDataURL('image/png'); a.click(); };
-      const toggleFullscreen = async()=>{ try { if(!document.fullscreenElement){ await containerRef.current?.requestFullscreen?.({navigationUI:'hide'});} else { await document.exitFullscreen(); } } catch(e){ console.warn('Fullscreen not available',e);} };
-
-      useEffect(()=>{ sizeCanvas(); drawGridOverlay(); }, [vjMode]);
-      useEffect(()=>{ drawGridOverlay(); }, [gridOn, gridOpacity, gridGlow, N]);
-
-      const BoundaryHint = () => {
-        const map = { fixed: 'Fixed (Dirichlet)', reflective: 'Reflective (Neumann)', periodic: 'Periodic (Wrap)' };
-        return <span className="text-xs text-emerald-400/70">{map[boundary]}</span>;
+      const perturb = ()=>{
+        const {u,v}=fieldRef.current; for(let i=0;i<u.length;i++){ u[i]= (Math.random()-0.5)*0.6; v[i]=0; }
       };
+      const clearField=()=>{ const {u,v}=fieldRef.current; u.fill(0); v.fill(0); };
+
+      useEffect(()=>{ patchStateRef.current[mode]={}; perturb(); },[mode]);
+      useEffect(()=>{
+        const onKey=(e)=>{ if(e.code==='Space'){ e.preventDefault(); setRunning(v=>!v);} };
+        window.addEventListener('keydown', onKey);
+        return()=>window.removeEventListener('keydown', onKey);
+      },[]);
+      useEffect(()=>{
+        const c=canvasRef.current; if(!c) return;
+        let pressing=false;
+        const toCell=(e)=>{
+          const rect=c.getBoundingClientRect();
+          const x=Math.floor(((e.clientX-rect.left)/rect.width)*n);
+          const y=Math.floor(((e.clientY-rect.top)/rect.height)*n);
+          return {x:clamp(x,0,n-1), y:clamp(y,0,n-1)};
+        };
+        const paint=(x,y)=>{
+          const {u}=fieldRef.current; const r=6, r2=r*r;
+          for(let yy=Math.max(0,y-r);yy<Math.min(n,y+r);yy++){
+            for(let xx=Math.max(0,x-r);xx<Math.min(n,x+r);xx++){
+              const d2=(xx-x)*(xx-x)+(yy-y)*(yy-y); if(d2<=r2){ u[idx(n,xx,yy)] += Math.exp(-d2/(0.4*r2)); }
+            }
+          }
+        };
+        const onDown=(e)=>{pressing=true; const {x,y}=toCell(e); paint(x,y);};
+        const onMove=(e)=>{ if(!pressing) return; const {x,y}=toCell(e); paint(x,y); };
+        const onUp=()=>{pressing=false;};
+        c.addEventListener('pointerdown',onDown);
+        window.addEventListener('pointermove',onMove);
+        window.addEventListener('pointerup',onUp);
+        return()=>{c.removeEventListener('pointerdown',onDown); window.removeEventListener('pointermove',onMove); window.removeEventListener('pointerup',onUp);};
+      },[n]);
+
+      const activePatch = patchLibrary[mode];
+      const patchGraph = activePatch?.graph || [];
 
       return (
-        <div className={`w-full ${vjMode ? 'max-w-none' : 'max-w-[1200px]'} mx-auto p-4 text-emerald-200 bg-black/95 rounded-2xl shadow-[0_0_40px_#00ff8840]`}>
-          {!vjMode && (
-            <>
-              <h1 className="text-2xl font-bold tracking-wide mb-2 text-emerald-300">Matrix Grid Vibration Lab</h1>
-              <p className="text-sm text-emerald-400/80 mb-4">
-                Neon grid simulation of a vibrating 2D field. Click & drag to excite. PNG capture included.
-                Shortcuts: [Space]=Play/Pause, [F]=Fullscreen, [V]=VJ Mode
-              </p>
-            </>
-          )}
-
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className={`${vjMode ? 'md:col-span-3' : 'md:col-span-2'}`}>
-              <div ref={containerRef} className="w-full flex items-center justify-center rounded-2xl p-2 bg-gradient-to-b from-black via-zinc-950 to-black border border-emerald-700/30 shadow-[0_0_80px_#00ff8820]">
-                <canvas ref={canvasRef} className="rounded-xl border border-emerald-700/40" />
+        <div className="min-h-screen bg-gradient-to-br from-black via-slate-950 to-black text-emerald-50">
+          <div className="max-w-6xl mx-auto px-4 py-6 space-y-6">
+            <header className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+              <div>
+                <p className="text-xs uppercase tracking-[0.35em] text-emerald-400/80">ARGOPd / Ofelia / EYESY DNA</p>
+                <h1 className="text-3xl md:text-4xl font-black text-emerald-200">PRISMatrix — pd~ patch lab</h1>
+                <p className="text-sm text-emerald-300/80 max-w-2xl">
+                  Pure Data-style operator graphs driving the neon membrane: metro / osc~ / env~ / sh~ / bp~ nodes snap together into
+                  three brutalist patches. Built for mic-reactive VJ use — open this HTML, enable audio, and paint.
+                </p>
               </div>
-              <div className={`flex items-center gap-3 mt-3 flex-wrap ${vjMode ? 'justify-center' : ''}`}>
-                <button className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-black font-semibold shadow-[0_0_20px_#00ff88]" onClick={()=>setRunning(v=>!v)}>{running ? 'Pause' : 'Play'}</button>
-                <button className="px-3 py-1.5 rounded-xl bg-zinc-800 text-emerald-200 border border-emerald-700/40" onClick={()=>{ setRunning(false); if(engine==='membrane') stepMembrane(clamp(c*c,0,0.5), gamma); else stepPlate(clamp(k,0,0.02), gamma); }}>Step +1</button>
-                <button className="px-3 py-1.5 rounded-xl bg-zinc-800 text-emerald-200 border border-emerald-700/40" onClick={reset}>Reset</button>
-                <button className="px-3 py-1.5 rounded-xl bg-zinc-800 text-emerald-200 border border-emerald-700/40" onClick={randomize}>Random</button>
-                <button className="px-3 py-1.5 rounded-xl bg-emerald-700 text-black" onClick={presetDrop}>Drop</button>
-                <button className="px-3 py-1.5 rounded-xl bg-emerald-700 text-black" onClick={presetTwoSources}>Two Sources</button>
-                <button className="px-3 py-1.5 rounded-xl bg-emerald-700 text-black" onClick={presetPlaneWave}>Plane Wave</button>
-                <button className="px-3 py-1.5 rounded-xl bg-emerald-500 text-black" onClick={exportPNG}>Save PNG</button>
-                <button className="px-3 py-1.5 rounded-xl bg-emerald-800 text-emerald-200 border border-emerald-700/40" onClick={toggleFullscreen}>{isFs ? 'Exit Fullscreen' : 'Fullscreen'}</button>
-                <button className={`px-3 py-1.5 rounded-xl ${vjMode? 'bg-emerald-500 text-black' : 'bg-zinc-800 text-emerald-200 border border-emerald-700/40'}`} onClick={()=>setVjMode(v=>!v)}>{vjMode ? 'Exit VJ Mode' : 'VJ Mode'}</button>
-                {showFPS && (<span className="ml-auto text-sm text-emerald-400/80">FPS: {fps.current.fps.toFixed(1)}</span>)}
+              <div className="flex items-center gap-2 text-xs text-emerald-300/80 bg-emerald-900/30 px-3 py-2 rounded-full border border-emerald-700/40">
+                <span className="inline-flex h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+                realtime canvas core
+              </div>
+            </header>
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              <div className="lg:col-span-2">
+                <div className="relative w-full aspect-square bg-black/70 border border-emerald-800/40 rounded-3xl overflow-hidden shadow-[0_0_70px_#00f6bb30] flex items-center justify-center">
+                  <canvas ref={canvasRef} className="absolute inset-0" />
+                  <canvas ref={overlayRef} className="absolute inset-0 pointer-events-none" />
+                </div>
+                <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-emerald-200/80">
+                  <button onClick={()=>setRunning(v=>!v)} className="px-3 py-2 bg-emerald-500 text-black rounded-xl shadow-[0_0_18px_#00ff8870] font-semibold">{running?'Pause':'Play'}</button>
+                  <button onClick={perturb} className="px-3 py-2 bg-slate-900 border border-emerald-700/40 rounded-xl">Re-seed patch</button>
+                  <button onClick={clearField} className="px-3 py-2 bg-slate-900 border border-emerald-700/40 rounded-xl">Clear</button>
+                  <button onClick={()=>setMicOn(v=>!v)} className={`px-3 py-2 rounded-xl border ${micOn?'bg-fuchsia-500 text-black border-fuchsia-400/70':'bg-slate-900 border-emerald-700/40'}`}>{micOn?'Mic On':'Enable Mic'}</button>
+                  <button onClick={()=>{drawGrid(); resizeCanvas();}} className="px-3 py-2 bg-slate-900 border border-emerald-700/40 rounded-xl">Refresh Grid</button>
+                  <span className="ml-auto text-emerald-400/80">FPS ~ {fps.toFixed(1)}</span>
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                <section className="p-4 rounded-2xl border border-emerald-800/40 bg-slate-950/70 shadow-[0_0_40px_#00ffc020]">
+                  <h2 className="text-lg font-semibold text-emerald-200 mb-1">Patch Rack (pd~)</h2>
+                  <p className="text-xs text-emerald-200/70 mb-2">Pure Data operator graphs (metro / osc~ / env~ / sh~ / bp~) that smack the membrane in three different moods.</p>
+                  <div className="grid grid-cols-1 gap-2">
+                    {Object.entries(patchLibrary).map(([key,val])=> (
+                      <button key={key} onClick={()=>setMode(key)} className={`text-left px-3 py-2 rounded-xl border transition-all ${mode===key? 'bg-emerald-500 text-black border-emerald-300' : 'bg-slate-900 border-emerald-800/40 text-emerald-100'}`}>
+                        <div className="font-semibold">{val.name}</div>
+                        <div className="text-xs text-emerald-200/70">{val.hint}</div>
+                      </button>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="p-4 rounded-2xl border border-emerald-800/40 bg-slate-950/70">
+                  <h2 className="text-lg font-semibold text-emerald-200 mb-1">Patch Graph</h2>
+                  <p className="text-xs text-emerald-200/70 mb-3">pd~ operator blocks + inputs for the selected patch. Nodes are evaluated each frame and push impulses into the membrane.</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                    {patchGraph.map((node)=>(
+                      <div key={node.id} className="border border-emerald-800/50 rounded-xl px-3 py-2 bg-slate-900/70">
+                        <div className="flex items-center justify-between">
+                          <span className="font-semibold text-emerald-100">{node.id}</span>
+                          <span className="text-[11px] font-mono text-fuchsia-200">{node.type}</span>
+                        </div>
+                        <div className="text-[11px] text-emerald-200/70">in: {node.inputs?.length? node.inputs.join(', '): '—'}</div>
+                        <div className="text-[11px] text-emerald-200/70">params: {Object.entries(node).filter(([k])=>!['id','type','inputs'].includes(k)).map(([k,v])=>`${k}=${v}`).join(', ')||'—'}</div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="p-4 rounded-2xl border border-fuchsia-700/40 bg-gradient-to-br from-slate-950 via-fuchsia-950/30 to-emerald-950/40">
+                  <h2 className="text-lg font-semibold text-fuchsia-200 mb-2">Look & Motion</h2>
+                  <label className="text-xs text-emerald-200/80">Grid Density</label>
+                  <input type="range" min={96} max={320} step={8} value={n} onChange={e=>setN(parseInt(e.target.value))} className="w-full" />
+                  <div className="text-xs text-emerald-300/70 mb-3">N = {n}</div>
+
+                  <label className="text-xs text-emerald-200/80">Palette</label>
+                  <div className="flex gap-2 mb-3">
+                    {Object.entries(palettes).map(([key,val])=>(
+                      <button key={key} onClick={()=>setPalette(key)} className={`px-3 py-1.5 rounded-xl text-xs border ${palette===key?'bg-fuchsia-500 text-black border-fuchsia-300':'bg-slate-900 border-emerald-800/40 text-emerald-100'}`}>{val.name}</button>
+                    ))}
+                  </div>
+
+                  <label className="text-xs text-emerald-200/80">Tilt / Roll</label>
+                  <input type="range" min={-45} max={45} step={1} value={tilt} onChange={e=>setTilt(parseFloat(e.target.value))} className="w-full" />
+                  <div className="text-xs text-emerald-300/70 mb-3">{tilt.toFixed(0)}°</div>
+
+                  <label className="text-xs text-emerald-200/80">Grid Glow</label>
+                  <input type="range" min={0} max={0.5} step={0.01} value={gridGlow} onChange={e=>setGridGlow(parseFloat(e.target.value))} className="w-full" />
+                  <div className="text-xs text-emerald-300/70 mb-3">{gridGlow.toFixed(2)}</div>
+
+                  <label className="text-xs text-emerald-200/80">Grain / Dirt</label>
+                  <input type="range" min={0} max={0.5} step={0.01} value={grain} onChange={e=>setGrain(parseFloat(e.target.value))} className="w-full" />
+                  <div className="text-xs text-emerald-300/70">{grain.toFixed(2)}</div>
+                </section>
+
+                <section className="p-4 rounded-2xl border border-cyan-700/40 bg-slate-950/60">
+                  <h2 className="text-lg font-semibold text-cyan-200 mb-2">Mic Input</h2>
+                  <p className="text-xs text-emerald-200/70 mb-2">Beat detection is ultra-lightweight. Shouting or clapping gives harder shocks.</p>
+                  <div className="flex items-center gap-2 text-sm">
+                    <span className="text-cyan-300">{status}</span>
+                    <div className="h-2 flex-1 bg-slate-900 rounded-full overflow-hidden">
+                      <div className="h-full bg-gradient-to-r from-fuchsia-400 via-emerald-400 to-cyan-300" style={{width:`${clamp(energyRef.current*120, 3, 100)}%`}} />
+                    </div>
+                  </div>
+                </section>
+
+                <section className="p-4 rounded-2xl border border-emerald-800/40 bg-slate-950/70 text-xs text-emerald-200/80">
+                  <h2 className="text-sm font-semibold text-emerald-200 mb-1">Shortcuts</h2>
+                  <ul className="list-disc list-inside space-y-1">
+                    <li>Click canvas to excite the field (mouse press ripples)</li>
+                    <li>Press Space to pause/resume</li>
+                    <li>Resize the window to reflow the canvas framing</li>
+                  </ul>
+                </section>
               </div>
             </div>
-
-            {!vjMode && (
-              <div className="space-y-4">
-                <div className="p-4 rounded-xl border border-emerald-700/40 bg-zinc-950/80">
-                  <div className="flex items-center justify-between mb-2">
-                    <h2 className="font-semibold text-emerald-300">Engine</h2>
-                    <BoundaryHint />
-                  </div>
-                  <div className="flex gap-2 mb-3">
-                    <button className={`px-3 py-1.5 rounded-xl border ${engine==='membrane'?'bg-emerald-600 text-black':'bg-transparent text-emerald-200 border-emerald-700/40'}`} onClick={()=>setEngine('membrane')}>Membrane</button>
-                    <button className={`px-3 py-1.5 rounded-xl border ${engine==='plate'?'bg-emerald-600 text-black':'bg-transparent text-emerald-200 border-emerald-700/40'}`} onClick={()=>setEngine('plate')}>Thin Plate</button>
-                  </div>
-
-                  <label className="block text-sm mb-1">Boundary</label>
-                  <select className="w-full border rounded-lg p-2 bg-black text-emerald-200 border-emerald-700/40 mb-3" value={boundary} onChange={e=>setBoundary(e.target.value)}>
-                    <option value="fixed">Fixed (Dirichlet)</option>
-                    <option value="reflective">Reflective (Neumann)</option>
-                    <option value="periodic">Periodic (Wrap)</option>
-                  </select>
-
-                  <label className="block text-sm mb-1">Resolution N×N (80–256)</label>
-                  <input type="range" min={80} max={256} step={8} value={N} onChange={e=>setN(parseInt(e.target.value))} className="w-full" />
-                  <div className="text-xs text-emerald-400/70 mb-3">Current: {N} × {N}</div>
-
-                  {engine==='membrane' ? (
-                    <>
-                      <label className="block text-sm mb-1">Wave Speed c (0.05–0.65)</label>
-                      <input type="range" min={0.05} max={0.65} step={0.01} value={c} onChange={e=>setC(parseFloat(e.target.value))} className="w-full" />
-                      <div className="text-xs text-emerald-400/70 mb-3">c = {c.toFixed(2)} (CFL-safe)</div>
-                    </>
-                  ) : (
-                    <>
-                      <label className="block text-sm mb-1">Stiffness k (0.000–0.020)</label>
-                      <input type="range" min={0} max={0.02} step={0.001} value={k} onChange={e=>setK(parseFloat(e.target.value))} className="w-full" />
-                      <div className="text-xs text-emerald-400/70 mb-3">k = {k.toFixed(3)} (too large → unstable)</div>
-                    </>
-                  )}
-
-                  <label className="block text-sm mb-1">Damping γ (0.000–0.050)</label>
-                  <input type="range" min={0} max={0.05} step={0.001} value={gamma} onChange={e=>setGamma(parseFloat(e.target.value))} className="w-full" />
-                  <div className="text-xs text-emerald-400/70 mb-3">γ = {gamma.toFixed(3)}</div>
-
-                  <label className="block text-sm mb-1">Steps / Frame (1–5)</label>
-                  <input type="range" min={1} max={5} step={1} value={stepsPerFrame} onChange={e=>setStepsPerFrame(parseInt(e.target.value))} className="w-full" />
-                  <div className="text-xs text-emerald-400/70 mb-3">{stepsPerFrame} step/frame</div>
-
-                  <label className="block text-sm mb-1">Amplitude → Color Scale</label>
-                  <input type="range" min={0.2} max={5} step={0.1} value={ampScale} onChange={e=>setAmpScale(parseFloat(e.target.value))} className="w-full" />
-                  <div className="text-xs text-emerald-400/70 mb-3">±{ampScale.toFixed(1)} mapped to full brightness</div>
-
-                  <div className="flex items-center gap-2 mb-2">
-                    <input id="fps" type="checkbox" checked={showFPS} onChange={e=>setShowFPS(e.target.checked)} />
-                    <label htmlFor="fps" className="text-sm">Show FPS</label>
-                  </div>
-                </div>
-
-                <div className="p-4 rounded-xl border border-emerald-700/40 bg-zinc-950/80">
-                  <h2 className="font-semibold text-emerald-300 mb-2">Brush</h2>
-                  <label className="block text-sm mb-1">Radius (cells)</label>
-                  <input type="range" min={1} max={24} step={1} value={brushRadius} onChange={e=>setBrushRadius(parseInt(e.target.value))} className="w-full" />
-                  <div className="text-xs text-emerald-400/70 mb-3">r = {brushRadius}</div>
-
-                  <label className="block text-sm mb-1">Power (amplitude)</label>
-                  <input type="range" min={0.1} max={4} step={0.1} value={brushPower} onChange={e=>setBrushPower(parseFloat(e.target.value))} className="w-full" />
-                  <div className="text-xs text-emerald-400/70">{brushPower.toFixed(1)}</div>
-                </div>
-
-                <div className="p-4 rounded-xl border border-emerald-700/40 bg-zinc-950/80">
-                  <h2 className="font-semibold text-emerald-300 mb-2">Neon Grid</h2>
-                  <div className="flex items-center gap-2 mb-2">
-                    <input id="grid" type="checkbox" checked={gridOn} onChange={e=>setGridOn(e.target.checked)} />
-                    <label htmlFor="grid" className="text-sm">Enable Grid</label>
-                  </div>
-                  <label className="block text-sm mb-1">Grid Opacity</label>
-                  <input type="range" min={0} max={0.6} step={0.01} value={gridOpacity} onChange={e=>setGridOpacity(parseFloat(e.target.value))} className="w-full" />
-                  <div className="text-xs text-emerald-400/70 mb-3">{gridOpacity.toFixed(2)}</div>
-
-                  <label className="block text-sm mb-1">Grid Glow</label>
-                  <input type="range" min={0} max={16} step={1} value={gridGlow} onChange={e=>setGridGlow(parseInt(e.target.value))} className="w-full" />
-                  <div className="text-xs text-emerald-400/70">{gridGlow}px</div>
-                </div>
-
-                <div className="p-4 rounded-xl border border-emerald-700/40 bg-zinc-950/80">
-                  <h2 className="font-semibold text-emerald-300 mb-2">Sequencer</h2>
-                  <div className="flex items-center gap-2 mb-2">
-                    <input id="seq" type="checkbox" checked={seqOn} onChange={e=>setSeqOn(e.target.checked)} />
-                    <label htmlFor="seq" className="text-sm">Enable</label>
-                  </div>
-
-                  <label className="block text-sm mb-1">Mode</label>
-                  <div className="flex gap-2 mb-3">
-                    <button className={`px-3 py-1.5 rounded-xl border ${seqMode==='random'?'bg-emerald-600 text-black':'bg-transparent text-emerald-200 border-emerald-700/40'}`} onClick={()=>setSeqMode('random')}>Random</button>
-                    <button className={`px-3 py-1.5 rounded-xl border ${seqMode==='grid'?'bg-emerald-600 text-black':'bg-transparent text-emerald-200 border-emerald-700/40'}`} onClick={()=>setSeqMode('grid')}>Grid</button>
-                  </div>
-
-                  <label className="block text-sm mb-1">Interval (sec)</label>
-                  <input type="range" min={0.05} max={2} step={0.05} value={seqInterval} onChange={e=>setSeqInterval(parseFloat(e.target.value))} className="w-full" />
-                  <div className="text-xs text-emerald-400/70 mb-3">{seqInterval.toFixed(2)} s</div>
-
-                  <label className="block text-sm mb-1">Pulse Radius</label>
-                  <input type="range" min={1} max={32} step={1} value={seqRadius} onChange={e=>setSeqRadius(parseInt(e.target.value))} className="w-full" />
-                  <div className="text-xs text-emerald-400/70 mb-3">r = {seqRadius}</div>
-
-                  <label className="block text-sm mb-1">Pulse Power</label>
-                  <input type="range" min={0.1} max={4} step={0.1} value={seqPower} onChange={e=>setSeqPower(parseFloat(e.target.value))} className="w-full" />
-                  <div className="text-xs text-emerald-400/70 mb-3">{seqPower.toFixed(1)}</div>
-
-                  {seqMode==='grid' && (
-                    <>
-                      <label className="block text-sm mb-1">Grid (cols × rows)</label>
-                      <div className="grid grid-cols-2 gap-2 mb-3">
-                        <input type="range" min={2} max={32} step={1} value={seqCols} onChange={e=>setSeqCols(parseInt(e.target.value))} />
-                        <input type="range" min={2} max={32} step={1} value={seqRows} onChange={e=>setSeqRows(parseInt(e.target.value))} />
-                      </div>
-                      <div className="text-xs text-emerald-400/70 mb-3">{seqCols} × {seqRows}</div>
-
-                      <div className="flex items-center gap-2 mb-2">
-                        <input id="zigzag" type="checkbox" checked={seqZigzag} onChange={e=>setSeqZigzag(e.target.checked)} />
-                        <label htmlFor="zigzag" className="text-sm">Snake Order</label>
-                      </div>
-
-                      <label className="block text-sm mb-1">Position Jitter (0–1)</label>
-                      <input type="range" min={0} max={1} step={0.01} value={seqJitter} onChange={e=>setSeqJitter(parseFloat(e.target.value))} className="w-full" />
-                      <div className="text-xs text-emerald-400/70">{seqJitter.toFixed(2)}</div>
-                    </>
-                  )}
-                </div>
-              </div>
-            )}
           </div>
-
-          {!vjMode && (
-            <footer className="mt-6 text-xs text-emerald-500/80">
-              MIT License © {new Date().getFullYear()} Matrix Vibration Lab. React + Canvas2D.
-            </footer>
-          )}
         </div>
       );
     }
 
-    // **** FINAL RENDER CALL (this was missing) ****
-    ReactDOM.createRoot(document.getElementById('root')).render(<MatrixVibrationLab />);
+    ReactDOM.createRoot(document.getElementById('root')).render(<PrismatrixApp />);
   </script>
 </body>
 </html>
